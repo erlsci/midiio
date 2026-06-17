@@ -12,8 +12,12 @@ bad()  { printf 'FAIL - %s\n' "$1"; fail=1; }
 ROOT=$(git rev-parse --show-toplevel)
 SCRIPT="$ROOT/scripts/vendor-minimidio.sh"
 
-# Source the script as a library; the guard keeps main() from running.
+# Source the script as a library; the guard keeps main() from running. Under
+# /bin/sh the assignment before the `.` builtin persists and is exported, so we
+# unset it immediately — otherwise child `sh "$SCRIPT"` calls below would inherit
+# it and short-circuit their own guard (main would never run).
 VENDOR_MINIMIDIO_LIB=1 . "$SCRIPT"
+unset VENDOR_MINIMIDIO_LIB
 set +e   # assert on exit codes ourselves
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/vmm-test.XXXXXX")
@@ -33,14 +37,18 @@ v=$(extract_version "$TMP/absent.h")
 [ "$v" = "unknown" ] && pass "version absent -> unknown" || bad "version absent -> '$v'"
 
 # ── --verify drift gate ──────────────────────────────────────────────────────
+# verify cd's to the repo top itself and takes an absolute FILE, so no wrapping
+# subshell is needed (a `( ... )` here re-triggers the EXIT trap on some shells).
 if [ -f "$ROOT/c_src/minimidio.lock" ]; then
-    ( cd "$ROOT" && sh "$SCRIPT" --verify ) >/dev/null 2>&1 \
-        && pass "verify clean tree -> exit 0" || bad "verify clean tree -> nonzero"
+    sh "$SCRIPT" --verify >/dev/null 2>&1
+    rc=$?
+    [ "$rc" -eq 0 ] && pass "verify clean tree -> exit 0" || bad "verify clean tree -> rc=$rc"
 
     cp "$ROOT/c_src/minimidio.h" "$TMP/drift.h"
     printf '/* tampered */\n' >> "$TMP/drift.h"
-    ( cd "$ROOT" && sh "$SCRIPT" --verify "$TMP/drift.h" ) >/dev/null 2>&1
-    [ $? -ne 0 ] && pass "verify drift -> nonzero" || bad "verify drift -> exit 0"
+    sh "$SCRIPT" --verify "$TMP/drift.h" >/dev/null 2>&1
+    rc=$?
+    [ "$rc" -ne 0 ] && pass "verify drift -> nonzero (rc=$rc)" || bad "verify drift -> exit 0"
 else
     printf 'skip - verify tests (no lock yet; run after baseline vendoring)\n'
 fi
