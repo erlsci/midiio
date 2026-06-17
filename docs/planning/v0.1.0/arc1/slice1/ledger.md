@@ -24,7 +24,7 @@
 | 12 | `rebar3 xref` clean | run; zero undefined/unused | S2 | ✅ done | `rebar3 xref` → `Running cross reference analysis...`, zero findings, exit 0. | |
 | 13 | `rebar3 dialyzer` clean | run; zero warnings | S2 | ✅ done | `rebar3 as test check` dialyzer step: `Analyzing 2 files`, zero warnings. Required `{plt_extra_apps, [eunit, proper]}` so the eunit-generated `test/0` is not flagged unknown (see Notes). | |
 | 14 | `rebar3 eunit` green | run; all tests pass | S1 | ✅ done | `rebar3 eunit` → `All 6 tests passed.` | |
-| 15 | `rebar3 check` (the alias: compile→xref→dialyzer→eunit→coverage) green | run the alias end to end | S1 | ✅ done* | `rebar3 as test check` runs compile→xref→dialyzer→eunit→coverage end-to-end, exit 0. *Caveats (see Notes): must run `as test` (the `proper` plugin is test-scoped); cover cannot instrument `midiio.beam` because module reload re-triggers `on_load`→`load_nif` (upgrade unsupported by the prescribed `ERL_NIF_INIT`) — `min_coverage=0` keeps the alias green and eunit carries the behavioural evidence. | |
+| 15 | `rebar3 check` (the alias: compile→xref→dialyzer→eunit→coverage) green | run the alias end to end | S1 | ✅ done* | `rebar3 as test check` runs compile→xref→dialyzer→eunit→coverage end-to-end, exit 0. *Caveat: must run `as test` (the `proper` plugin is test-scoped). **AMENDED 2026-06-17 (F1 remediation):** the cover/NIF caveat is resolved — an `upgrade` callback was added (`ERL_NIF_INIT(... upgrade ...)`), so cover now instruments `midiio.beam` (33% real line data) and the gate is a **real `--min_coverage=30`**, not `0`. See `F1-remediation-ledger.md` / `F1-remediation-closing.md`. | |
 | 16 | No memory error under a sanitizer pass on the open/close/GC cycle | build the TU with `-fsanitize=address` (or run under `valgrind` on Linux); open/close/GC loop; zero leaks/errors | S2 | ✅ done* | ASan harness `c_src/test/midiio_asan.c` → `ASAN-OK`, exit 0: zero use-after-free / double-free / overflow over 200 init→uninit→double-uninit cycles + all-8 `mm_result_string` checks. *LeakSanitizer is unsupported on macOS, so **leak** detection is disclosed-deferred to the Linux/valgrind pass (with row 3). | |
 
 ## Amendments
@@ -64,7 +64,13 @@
   promote the plugin. Only additive change made here: `{plt_extra_apps, [eunit,
   proper]}` in the `dialyzer` config (the unified test-profile run analyzes the
   test modules).
-- **cover × NIF (disclosed).** `rebar3 cover` cannot instrument `midiio.beam`:
+- **cover × NIF (RESOLVED 2026-06-17 — F1 remediation).** The caveat below was
+  fixed: `c_src/midiio_nif.c` now has an `upgrade` callback (resource type taken
+  over with `ERL_NIF_RT_TAKEOVER`, shared mutex/atoms not re-created, `unload`
+  NULL), so module reload succeeds and cover instruments `midiio.beam` (33% real
+  line data). `rebar.config` now enforces `--min_coverage=30` (gate has teeth).
+  See `F1-remediation-ledger.md`. Original caveat retained below for history:
+- **cover × NIF (disclosed, original).** `rebar3 cover` cannot instrument `midiio.beam`:
   cover recompiles + reloads the module, which re-runs `-on_load` → `load_nif`,
   and the prescribed `ERL_NIF_INIT(..., NULL upgrade)` reports "Upgrade not
   supported by this NIF library." This is inherent to a NIF module under cover;

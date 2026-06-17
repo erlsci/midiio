@@ -86,22 +86,38 @@ static void dtor_context(ErlNifEnv *env, void *obj)
     do_uninit((midiio_ctx_res *)obj);
 }
 
-/* ── load ───────────────────────────────────────────────────────────────── */
-
-static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info)
+/* ── load / upgrade ─────────────────────────────────────────────────────────
+ * The NIF .so is loaded once and persists; a BEAM-module reload (e.g. cover
+ * instrumentation, or a hot upgrade) re-runs -on_load against the same library,
+ * which fires `upgrade` rather than `load`. Because the same .so is reused, the
+ * module-level statics (g_ctx_res_type, g_uninit_lock, the am_* atoms,
+ * g_uninit_count) are SHARED across module instances (ERTS: "sharing the dynamic
+ * library means static data is shared as well"). So:
+ *   - the resource type must be *taken over* on upgrade, not re-created
+ *     (ERL_NIF_RT_TAKEOVER) — the new instance inherits existing resources and
+ *     its dtor applies to them (nif-lifecycle / nif-resources cards);
+ *   - the mutex is created once and reused (re-creating it would leak the old
+ *     one and dangle the count); and
+ *   - `unload` stays NULL — freeing the shared mutex when the old instance is
+ *     purged would dangle the live instance that still holds it.
+ * init_statics() is the single shared path so load and upgrade cannot diverge.
+ */
+static int init_statics(ErlNifEnv *env, ErlNifResourceFlags flags)
 {
-    (void)priv_data;
-    (void)load_info;
-
-    g_ctx_res_type = enif_open_resource_type(
-        env, NULL, "midiio_context", dtor_context, ERL_NIF_RT_CREATE, NULL);
-    if (g_ctx_res_type == NULL)
+    ErlNifResourceType *rt = enif_open_resource_type(
+        env, NULL, "midiio_context", dtor_context, flags, NULL);
+    if (rt == NULL)
         return -1;
+    g_ctx_res_type = rt;
 
-    g_uninit_lock = enif_mutex_create("midiio_uninit_lock");
-    if (g_uninit_lock == NULL)
-        return -1;
+    /* Created on first load; reused (not re-created) on takeover. */
+    if (g_uninit_lock == NULL) {
+        g_uninit_lock = enif_mutex_create("midiio_uninit_lock");
+        if (g_uninit_lock == NULL)
+            return -1;
+    }
 
+    /* Atoms are global and immutable; (re-)deriving them is idempotent. */
     am_ok           = enif_make_atom(env, "ok");
     am_error        = enif_make_atom(env, "error");
     am_invalid_arg  = enif_make_atom(env, "invalid_arg");
@@ -112,6 +128,22 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info)
     am_alloc_failed = enif_make_atom(env, "alloc_failed");
 
     return 0;
+}
+
+static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info)
+{
+    (void)priv_data;
+    (void)load_info;
+    return init_statics(env, ERL_NIF_RT_CREATE);
+}
+
+static int upgrade(ErlNifEnv *env, void **priv_data, void **old_priv_data,
+                   ERL_NIF_TERM load_info)
+{
+    (void)priv_data;
+    (void)old_priv_data;
+    (void)load_info;
+    return init_statics(env, ERL_NIF_RT_TAKEOVER);
 }
 
 /* ── NIFs ───────────────────────────────────────────────────────────────── */
@@ -197,4 +229,7 @@ static ErlNifFunc nif_funcs[] = {
     {"uninit_count",  0, uninit_count},
 };
 
-ERL_NIF_INIT(midiio, nif_funcs, load, NULL, NULL, NULL)
+/* Args: module, funcs, load, reload(deprecated→NULL), upgrade, unload.
+ * upgrade is non-NULL so a module reload (cover / hot upgrade) succeeds; unload
+ * is NULL because the shared statics must outlive an old purged instance. */
+ERL_NIF_INIT(midiio, nif_funcs, load, NULL, upgrade, NULL)
