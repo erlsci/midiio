@@ -74,6 +74,16 @@ so they render on macOS + Linux. Offline surface verified in-sandbox; rebar3-bac
 targets confirmed by CC on macOS (`workbench/slice4-buildtooling-confirm-cc-prompt.md`).
 Ordering only — does not block the arc's capabilities.
 
+**Slice 5 — arc-1 hardening (close-out).** No new device capability; pays down the
+debt before arc 2: a **NIF-aware coverage strategy** (exclude the binding module
+from the cover gate so it stops eroding), **F2** (gate test-only NIFs behind a
+test build), **F3** (scope `plt_extra_apps` to the test profile so bare
+`rebar3 dialyzer` works), **relocate `NIF-LEARNINGS.md`** into tracked space, a
+**cross-platform CI** matrix (ubuntu + macos) that closes the deferred-Linux pile
+(slice-1 row 3, slice-3 row 6, slice-1 row 16 leak) on every push, and **commit
+hygiene**. Ends with the **arc-1 close-out check** (specified-vs-delivered diff).
+Two items carry disclose-defer latitude (F2 dual-build; headless-ALSA runtime).
+
 ## Arc 2 — Outbound transport
 
 **Capability:** open an output device, `send(Dev, <<bytes>>)` a complete message,

@@ -56,9 +56,14 @@ xref:
 	@$(REBAR) xref
 	@printf '$(GREEN)✓ xref passed$(RESET)\n'
 
+# Runs under `as test`: rebar.config's dialyzer `plt_extra_apps` lists `proper`,
+# which is a test-profile-only dep, so a default-profile `rebar3 dialyzer` fails
+# with "Could not find application: proper". This matches how `check` runs it.
+# (Root-cause alternative: scope `plt_extra_apps` to the test profile so a bare
+# `rebar3 dialyzer` also works — tracked for the rebar.config, not done here.)
 dialyzer:
 	@printf '$(BLUE)Running dialyzer...$(RESET)\n'
-	@$(REBAR) dialyzer
+	@$(REBAR) as test dialyzer
 	@printf '$(GREEN)✓ dialyzer passed$(RESET)\n'
 
 # --- Coverage ---------------------------------------------------------------
@@ -98,7 +103,9 @@ asan:
 	@printf '$(BLUE)Building + running the C ASan harness...$(RESET)\n'
 	@cc -fsanitize=address -g -std=c11 -Wall -Wextra -Wno-unused-function \
 	    c_src/test/midiio_asan.c -o /tmp/midiio_asan \
-	    $$(uname -s | grep -qi darwin && echo '-framework CoreMIDI' || echo '-lasound -lpthread') \
+	    $$(uname -s | grep -qi darwin \
+	        && echo '-framework CoreMIDI -framework CoreFoundation' \
+	        || echo '-lasound -lpthread') \
 	    && /tmp/midiio_asan \
 	    && printf '$(GREEN)✓ ASan clean$(RESET)\n'
 
