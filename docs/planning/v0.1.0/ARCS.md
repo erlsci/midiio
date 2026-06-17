@@ -51,10 +51,28 @@ SHA-pinned lock manifest, a fetch/verify script, a `make` wrapper, sha256 drift
 detection, and a two-commit attribution that credits the upstream author. Build
 hygiene that the rest of the arc rests on (every later slice compiles this header).
 
+**Slice 1 remediation F1** *(between slice 2 and slice 3).* Add a NIF `upgrade`
+callback so `cover` can instrument the module, and raise the coverage gate from a
+no-op to a real floor (CDC finding F1). Docs:
+`arc1/slice1/F1-remediation-{cc-prompt,ledger}.md`. Lands before slice 3 grows
+the module, so every later slice inherits a real coverage gate.
+
 **Slice 3 — enumeration + caps.** *(was slice 2.)* `list_inputs/1`,
 `list_outputs/1` (index+name via `mm_in_count`/`mm_in_name` etc.), `caps/1`
-returning backend atom + capability flags. Introduces the singleton **registry
-context** for ALSA enumeration (§2).
+returning a map with the **backend atom + capability booleans** (R6). Read-only
+discovery against the caller's context; the singleton **registry context** (§2)
+is deferred to arc 2 where the per-device-context model needs it (not required
+for enumeration).
+
+**Slice 4 — build tooling** *(inserted after slice 3; authored directly, not a
+ledger slice).* A styled `make` front end in the midilib house style (ANSI
+colours, `╔═╗` headings, `✓`/`→`/`⚠` markers): root `Makefile` + `mk/erlang.mk`
+(BEAM: compile/test/lint/coverage/docs/publish via rebar3, with the `as test`
+profile baked in) + `mk/minimidio.mk` (the vendored-C download/pin/verify, target
+names preserved for CI). Colours use a real ESC byte (`$(shell printf '\033')`)
+so they render on macOS + Linux. Offline surface verified in-sandbox; rebar3-backed
+targets confirmed by CC on macOS (`workbench/slice4-buildtooling-confirm-cc-prompt.md`).
+Ordering only — does not block the arc's capabilities.
 
 ## Arc 2 — Outbound transport
 

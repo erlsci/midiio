@@ -1,6 +1,6 @@
 {application, midiio, [
     {description, "Cross-platform realtime MIDI I/O for the BEAM via a NIF over the minimidio C library (raw transport; no message codec)"},
-    {vsn, "0.0.1"},
+    {vsn, "0.1.0"},
     {registered, []},
     {applications, [
         kernel,
