@@ -15,6 +15,12 @@
 -export([context_open/0, context_close/1, result_atom/1, uninit_count/0,
          list_inputs/1, list_outputs/1, caps/1]).
 
+%% NOTE (F2, disclosed-deferred in arc1/slice5): result_atom/1 and uninit_count/0
+%% are test-only introspection NIFs. Gating them out of the default surface via
+%% -ifdef(TEST)/-DMIDIIO_TEST was attempted and reverted — pc builds one shared
+%% .so across profiles, so a test-only NIF set makes load_nif order-dependent.
+%% See arc1/slice5/closing-report.md for the re-entry path. They are harmless (S3).
+
 -export_type([context/0, backend/0, caps/0]).
 
 %% Opaque handle to a native mm_context. Only meaningful when passed back to a

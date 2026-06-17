@@ -232,7 +232,11 @@ static ERL_NIF_TERM context_close(ErlNifEnv *env, int argc,
 
 /* result_atom(Code) -> atom()
  * Test/introspection NIF: exposes result_to_atom so eunit can assert the full
- * mm_result -> atom mapping (ledger row 9). Not part of the device API. */
+ * mm_result -> atom mapping (ledger row 9). Not part of the device API.
+ * NOTE (F2, disclosed-deferred in arc1/slice5): gating this and uninit_count/0
+ * out of the default build via -DMIDIIO_TEST was attempted and reverted — pc
+ * builds one shared .so in the source tree across profiles, so a test-only NIF
+ * set makes load_nif order-dependent. See slice5 closing report for re-entry. */
 static ERL_NIF_TERM result_atom(ErlNifEnv *env, int argc,
                                 const ERL_NIF_TERM argv[])
 {
