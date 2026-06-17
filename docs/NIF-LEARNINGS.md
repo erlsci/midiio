@@ -353,6 +353,29 @@ Good - floor against reachable Erlang lines (note the stub bodies are unreachabl
        stories for the two languages; don't let one masquerade as the other.
 ```
 
+## L18 — Conditional/test-only NIFs are hard under rebar3 + `pc`: one shared `.so` across profiles
+**Strength: CONSIDER. Stage: build (slice-5 F2, deferred). `[GAP]`.**
+
+Gating test-only NIFs behind `-DMIDIIO_TEST` (so they don't ship) sounds simple —
+`#ifdef` the C `ErlNifFunc` entries, `-ifdef(TEST)` the Erlang `-nifs`, add the
+macro to the test profile. It isn't, because the **`pc` port-compiler builds one
+shared `.so` in the source tree, not per-profile under `_build/`**. So a default
+`rebar3 compile` (no macro, N NIFs) followed by `rebar3 as test check` (Erlang now
+declares N+k `-nifs`) **reuses the stale default `.so`** → `load_nif` arity
+mismatch → `nif_not_loaded`. The build is *order-dependent*. Making it robust
+needs a per-profile `.so` artifact path (or a test pre-hook that force-rebuilds
+the `.so` under the macro) — disproportionate for harmless test NIFs.
+
+```text
+Bad  - #ifdef MIDIIO_TEST the NIF set + add the macro only to the test profile,
+       assuming each profile gets its own .so. Default-then-test reuses the stale
+       default .so → load_nif mismatch (order-dependent, flaky).
+Good - either keep the introspection NIFs unconditionally (they're harmless), or
+       give the test build its own .so artifact path so the binary's NIF set
+       always matches the module's -nifs. Don't split the NIF set across profiles
+       while a single shared .so is built in-tree.
+```
+
 ---
 
 ## Open threads to resolve into learnings as the build proceeds
