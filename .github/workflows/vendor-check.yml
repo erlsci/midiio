@@ -1,0 +1,18 @@
+name: vendor-check
+
+# Offline drift gate (R5): fail the build if the vendored c_src/minimidio.h no
+# longer matches the sha256 pinned in c_src/minimidio.lock — i.e. someone
+# hand-edited the header or bumped it without going through the vendoring tool.
+# This makes no network calls; it only re-hashes the in-tree header.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  minimidio-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: minimidio drift gate
+        run: make minimidio-verify

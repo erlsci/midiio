@@ -36,3 +36,51 @@ active development; the API will change. Published to Hex to reserve the name.
 ## Build
 
     $ rebar3 compile
+
+## Updating the vendored minimidio
+
+`midiio` **vendors** (does not fork) the single-header
+[minimidio](https://github.com/octetta/minimidio) library — MIT, © Joseph
+Stewart / `octetta`. The copy is pinned to an exact upstream commit and lives in:
+
+| File | Role |
+|------|------|
+| `c_src/minimidio.h` | the vendored header that gets compiled into the NIF |
+| `c_src/minimidio.LICENSE` | upstream's MIT license text (kept per MIT's notice requirement) |
+| `c_src/minimidio.lock` | provenance manifest: commit SHA, version, date, sha256, author |
+
+minimidio publishes **no git tags or releases**, so the deterministic pin is the
+**commit SHA**. The version string (e.g. `v0.5.0-dev`) is recorded for humans but
+is not a reliable handle.
+
+**See the current pin:**
+
+    $ cat c_src/minimidio.lock
+
+**Bump or roll back** — find the commit you want on
+[GitHub](https://github.com/octetta/minimidio/commits/main) and pass its SHA
+(rollbacks work the same way; just pick an older commit):
+
+    $ make vendor-minimidio SHA=<commit-sha>      # pin an exact commit
+    $ make vendor-minimidio REF=main              # pull the latest main, then pin its SHA
+
+This fetches `minimidio.h` + `LICENSE` at that commit, updates the lock, and makes
+**two commits**:
+
+1. **Commit A** — `minimidio.h` + `minimidio.LICENSE`, authored as the *upstream*
+   developer (read from the pinned commit). This keeps `git blame`/`git log`
+   correctly attributing the C code to its creator, not to us.
+2. **Commit B** — `minimidio.lock`, authored by you (our metadata, not theirs).
+
+**Preview without committing** — write the files and print the commit commands:
+
+    $ make vendor-minimidio SHA=<commit-sha> NO_COMMIT=1
+
+**Verify integrity** — fail if the in-tree header has drifted from the lock
+(re-hashes `c_src/minimidio.h`; offline; also runs in CI):
+
+    $ make minimidio-verify
+
+Re-pinning the commit already in the lock is a no-op. The tooling is
+`scripts/vendor-minimidio.sh` (POSIX `sh`; needs `curl`, `git`, and a sha256 tool);
+`scripts/test-vendor-minimidio.sh` runs its offline unit tests.
