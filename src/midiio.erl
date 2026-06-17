@@ -1,22 +1,36 @@
 %%% @doc Cross-platform realtime MIDI I/O for the BEAM via a NIF over the
 %%% minimidio C library (raw transport; no message codec).
 %%%
-%%% arc1/slice1 surface: open and close an opaque per-call MIDI context. The
-%%% device API (enumeration, open/send/recv) arrives in later slices.
+%%% Surface so far: open/close an opaque per-call MIDI context (slice 1) and
+%%% read-only discovery — `list_inputs/1', `list_outputs/1', `caps/1' (slice 3).
+%%% Opening devices and send/recv arrive in later arcs.
 %%% @end
 -module(midiio).
 
 -on_load(init/0).
 
--nifs([context_open/0, context_close/1, result_atom/1, uninit_count/0]).
+-nifs([context_open/0, context_close/1, result_atom/1, uninit_count/0,
+       list_inputs/1, list_outputs/1, caps/1]).
 
--export([context_open/0, context_close/1, result_atom/1, uninit_count/0]).
+-export([context_open/0, context_close/1, result_atom/1, uninit_count/0,
+         list_inputs/1, list_outputs/1, caps/1]).
 
--export_type([context/0]).
+-export_type([context/0, backend/0, caps/0]).
 
 %% Opaque handle to a native mm_context. Only meaningful when passed back to a
 %% midiio NIF; callers must not inspect it.
 -type context() :: term().
+
+%% The MIDI backend, chosen at compile time by minimidio's platform macro.
+-type backend() :: coremidi | winmm | alsa | webmidi.
+
+%% Decoded capability map for a context (mm_context_caps flags + backend).
+-type caps() :: #{backend     := backend(),
+                  midi1       := boolean(),
+                  ump         := boolean(),
+                  midi2       := boolean(),
+                  virtual_in  := boolean(),
+                  virtual_out := boolean()}.
 
 -define(NOT_LOADED, erlang:nif_error(nif_not_loaded)).
 
@@ -47,4 +61,22 @@ result_atom(_Code) ->
 %% uninit calls. Used by the eunit suite to verify destructor behaviour on GC.
 -spec uninit_count() -> non_neg_integer().
 uninit_count() ->
+    ?NOT_LOADED.
+
+%% @doc List the currently-visible MIDI input ports as `{Index, Name}' pairs,
+%% in ascending index order. `Index' is a display-only snapshot ordinal (it
+%% shifts on hotplug and is not a stable identity); `Name' is the UTF-8 name
+%% minimidio reports, unmodified. Fresh query each call; may be empty.
+-spec list_inputs(context()) -> [{non_neg_integer(), binary()}].
+list_inputs(_Ctx) ->
+    ?NOT_LOADED.
+
+%% @doc List the currently-visible MIDI output ports. See {@link list_inputs/1}.
+-spec list_outputs(context()) -> [{non_neg_integer(), binary()}].
+list_outputs(_Ctx) ->
+    ?NOT_LOADED.
+
+%% @doc The backend atom and decoded capability flags for the context.
+-spec caps(context()) -> caps().
+caps(_Ctx) ->
     ?NOT_LOADED.

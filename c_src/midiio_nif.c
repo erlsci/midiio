@@ -1,15 +1,31 @@
 /*
  * midiio_nif.c — NIF over the minimidio C library.
  *
- * arc1/slice1 scope: load callback + per-call context resource lifecycle only.
- * No enumeration, no device I/O, no dirty NIFs, no enif_send, no threads.
- * See docs/planning/v0.1.0/arc1/slice1/ for the slice doc and ledger.
+ * arc1/slice1: load callback + per-call context resource lifecycle.
+ * arc1/slice3: read-only discovery — list_inputs/1, list_outputs/1, caps/1.
+ * No device open, no I/O, no dirty NIFs, no enif_send, no threads.
+ * See docs/planning/v0.1.0/arc1/ for the slice docs and ledgers.
  */
 
 #define MINIMIDIO_IMPLEMENTATION
 #include "minimidio.h"
 
 #include <erl_nif.h>
+#include <string.h>
+
+/* Compile-time backend atom name, picked by minimidio's platform macro
+ * (defined in minimidio.h before the public structs). */
+#if defined(MM_BACKEND_COREMIDI)
+#  define MIDIIO_BACKEND "coremidi"
+#elif defined(MM_BACKEND_WINMM)
+#  define MIDIIO_BACKEND "winmm"
+#elif defined(MM_BACKEND_ALSA)
+#  define MIDIIO_BACKEND "alsa"
+#elif defined(MM_BACKEND_WEBMIDI)
+#  define MIDIIO_BACKEND "webmidi"
+#else
+#  define MIDIIO_BACKEND "unknown"
+#endif
 
 /* ── Resource type ──────────────────────────────────────────────────────────
  * The context is embedded by value. `live` is the slice's own lifecycle flag:
@@ -43,6 +59,17 @@ static ERL_NIF_TERM am_out_of_range;
 static ERL_NIF_TERM am_already_open;
 static ERL_NIF_TERM am_not_open;
 static ERL_NIF_TERM am_alloc_failed;
+
+/* caps/1 map keys + boolean values + the compile-time backend atom (slice 3). */
+static ERL_NIF_TERM am_true;
+static ERL_NIF_TERM am_false;
+static ERL_NIF_TERM am_backend;
+static ERL_NIF_TERM am_midi1;
+static ERL_NIF_TERM am_ump;
+static ERL_NIF_TERM am_midi2;
+static ERL_NIF_TERM am_virtual_in;
+static ERL_NIF_TERM am_virtual_out;
+static ERL_NIF_TERM g_backend_atom;
 
 /* ── Helpers ────────────────────────────────────────────────────────────── */
 
@@ -126,6 +153,16 @@ static int init_statics(ErlNifEnv *env, ErlNifResourceFlags flags)
     am_already_open = enif_make_atom(env, "already_open");
     am_not_open     = enif_make_atom(env, "not_open");
     am_alloc_failed = enif_make_atom(env, "alloc_failed");
+
+    am_true         = enif_make_atom(env, "true");
+    am_false        = enif_make_atom(env, "false");
+    am_backend      = enif_make_atom(env, "backend");
+    am_midi1        = enif_make_atom(env, "midi1");
+    am_ump          = enif_make_atom(env, "ump");
+    am_midi2        = enif_make_atom(env, "midi2");
+    am_virtual_in   = enif_make_atom(env, "virtual_in");
+    am_virtual_out  = enif_make_atom(env, "virtual_out");
+    g_backend_atom  = enif_make_atom(env, MIDIIO_BACKEND);
 
     return 0;
 }
@@ -222,11 +259,93 @@ static ERL_NIF_TERM uninit_count(ErlNifEnv *env, int argc,
     return enif_make_int(env, c);
 }
 
+/* ── Enumeration + capabilities (slice 3, read-only) ────────────────────────── */
+
+static ERL_NIF_TERM bool_atom(int truthy)
+{
+    return truthy ? am_true : am_false;
+}
+
+/* Build [{Index, NameBin}, …] in ascending index order for a count/name pair.
+ * Every in-range index gets an entry even if its name lookup fails — minimidio
+ * writes a placeholder (e.g. CoreMIDI's "(unknown)") and dropping the entry
+ * would desync the index from reality. The name buffer is pre-NUL'd so a
+ * non-writing failure yields an empty binary rather than garbage. Index is a
+ * display-only snapshot ordinal (DESIGN §5), not identity. */
+typedef uint32_t  (*mm_count_fn)(mm_context *);
+typedef mm_result (*mm_name_fn)(mm_context *, uint32_t, char *, size_t);
+
+static ERL_NIF_TERM enumerate(ErlNifEnv *env, mm_context *ctx,
+                              mm_count_fn count_fn, mm_name_fn name_fn)
+{
+    uint32_t     n    = count_fn(ctx);
+    ERL_NIF_TERM list = enif_make_list(env, 0); /* [] */
+
+    /* Descend so head-first cons yields ascending 0..n-1. */
+    for (uint32_t i = n; i-- > 0;) {
+        char buf[256];
+        buf[0] = '\0';
+        (void)name_fn(ctx, i, buf, sizeof buf); /* entry kept regardless of result */
+
+        size_t         len = strlen(buf);
+        ERL_NIF_TERM   name_bin;
+        unsigned char *p = enif_make_new_binary(env, len, &name_bin);
+        memcpy(p, buf, len);
+
+        ERL_NIF_TERM cell = enif_make_tuple2(env, enif_make_uint(env, i), name_bin);
+        list = enif_make_list_cell(env, cell, list);
+    }
+    return list;
+}
+
+/* list_inputs(Ctx) -> [{Index, Name}] — fresh query, no caching. */
+static ERL_NIF_TERM list_inputs(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+    midiio_ctx_res *res = NULL;
+    if (!enif_get_resource(env, argv[0], g_ctx_res_type, (void **)&res))
+        return enif_make_badarg(env);
+    return enumerate(env, &res->ctx, mm_in_count, mm_in_name);
+}
+
+/* list_outputs(Ctx) -> [{Index, Name}] — fresh query, no caching. */
+static ERL_NIF_TERM list_outputs(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+    midiio_ctx_res *res = NULL;
+    if (!enif_get_resource(env, argv[0], g_ctx_res_type, (void **)&res))
+        return enif_make_badarg(env);
+    return enumerate(env, &res->ctx, mm_out_count, mm_out_name);
+}
+
+/* caps(Ctx) -> #{backend := atom(), <flag> := boolean(), …}
+ * backend is the compile-time platform atom; flags decode mm_context_caps. */
+static ERL_NIF_TERM caps(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+    midiio_ctx_res *res = NULL;
+    if (!enif_get_resource(env, argv[0], g_ctx_res_type, (void **)&res))
+        return enif_make_badarg(env);
+
+    uint32_t     c = mm_context_caps(&res->ctx);
+    ERL_NIF_TERM m = enif_make_new_map(env);
+    enif_make_map_put(env, m, am_backend,     g_backend_atom,                  &m);
+    enif_make_map_put(env, m, am_midi1,       bool_atom(c & MM_CAP_MIDI1),     &m);
+    enif_make_map_put(env, m, am_ump,         bool_atom(c & MM_CAP_UMP),       &m);
+    enif_make_map_put(env, m, am_midi2,       bool_atom(c & MM_CAP_MIDI2),     &m);
+    enif_make_map_put(env, m, am_virtual_in,  bool_atom(c & MM_CAP_VIRTUAL_IN),  &m);
+    enif_make_map_put(env, m, am_virtual_out, bool_atom(c & MM_CAP_VIRTUAL_OUT), &m);
+    return m;
+}
+
 static ErlNifFunc nif_funcs[] = {
     {"context_open",  0, context_open},
     {"context_close", 1, context_close},
     {"result_atom",   1, result_atom},
     {"uninit_count",  0, uninit_count},
+    {"list_inputs",   1, list_inputs},
+    {"list_outputs",  1, list_outputs},
+    {"caps",          1, caps},
 };
 
 /* Args: module, funcs, load, reload(deprecated→NULL), upgrade, unload.

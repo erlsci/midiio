@@ -56,7 +56,77 @@ explicit_close_then_gc_no_double_uninit_test() ->
     reclaim(),
     ?assertEqual(Before + 1, midiio:uninit_count()).
 
+%% ── slice 3: enumeration + caps ─────────────────────────────────────────────
+%% Headless CI may have no MIDI ports, so the enumeration tests assert *shape*
+%% (a possibly-empty list of well-typed entries); caps is deterministic per OS.
+
+%% Row 1: list_inputs/1 returns a list of {non_neg_integer, binary}.
+list_inputs_shape_test() ->
+    {ok, C} = midiio:context_open(),
+    assert_port_list(midiio:list_inputs(C)),
+    ok = midiio:context_close(C).
+
+%% Row 2: list_outputs/1 same shape.
+list_outputs_shape_test() ->
+    {ok, C} = midiio:context_open(),
+    assert_port_list(midiio:list_outputs(C)),
+    ok = midiio:context_close(C).
+
+%% Row 3: indices are ascending and contiguous 0..N-1 for the snapshot.
+enumeration_indices_contiguous_test() ->
+    {ok, C} = midiio:context_open(),
+    InIdx  = [I || {I, _} <- midiio:list_inputs(C)],
+    OutIdx = [I || {I, _} <- midiio:list_outputs(C)],
+    ?assertEqual(lists:seq(0, length(InIdx) - 1), InIdx),
+    ?assertEqual(lists:seq(0, length(OutIdx) - 1), OutIdx),
+    ok = midiio:context_close(C).
+
+%% Row 5: caps/1 returns a map with the 6 keys; backend atom, flags boolean.
+caps_shape_test() ->
+    {ok, C} = midiio:context_open(),
+    Caps = midiio:caps(C),
+    ?assert(is_map(Caps)),
+    ?assertEqual(lists:sort([backend, midi1, ump, midi2, virtual_in, virtual_out]),
+                 lists:sort(maps:keys(Caps))),
+    ?assert(is_atom(maps:get(backend, Caps))),
+    [?assert(is_boolean(maps:get(K, Caps)))
+     || K <- [midi1, ump, midi2, virtual_in, virtual_out]],
+    ok = midiio:context_close(C).
+
+%% Rows 6 + 7: backend atom + flag decode for the host OS. On macOS/CoreMIDI the
+%% full map is asserted (matches minimidio.h:817); other backends verify on their
+%% own host (the branch is exercised by code read where CC lacks that OS).
+caps_backend_and_flags_test() ->
+    {ok, C} = midiio:context_open(),
+    Caps = midiio:caps(C),
+    case maps:get(backend, Caps) of
+        coremidi ->
+            ?assertEqual(#{backend => coremidi, midi1 => true, ump => false,
+                           midi2 => false, virtual_in => true,
+                           virtual_out => true}, Caps);
+        Other ->
+            ?assert(lists:member(Other, [winmm, alsa, webmidi]))
+    end,
+    ok = midiio:context_close(C).
+
+%% Row 8: a foreign handle is rejected with badarg by all three.
+enumeration_bad_handle_test() ->
+    R = make_ref(),
+    ?assertError(badarg, midiio:list_inputs(R)),
+    ?assertError(badarg, midiio:list_outputs(R)),
+    ?assertError(badarg, midiio:caps(R)).
+
 %% ── helpers ────────────────────────────────────────────────────────────────
+
+%% A port list is a list of {non_neg_integer(), binary()} (possibly empty).
+assert_port_list(L) ->
+    ?assert(is_list(L)),
+    lists:foreach(
+        fun({I, N}) ->
+            ?assert(is_integer(I)),
+            ?assert(I >= 0),
+            ?assert(is_binary(N))
+        end, L).
 
 %% Open a context in a monitored child process, hand it to Body, then let the
 %% process exit so its heap (and the resource term) is reclaimed. Blocks until
