@@ -44,9 +44,17 @@ opened in `load`; `context_open/0` + `context_close/1` with a destructor calling
 `mm_context_uninit`; `result_string` → atom mapping. Proves: the toolchain
 loads, a resource type round-trips, a destructor runs on GC.
 
-**Slice 2 — enumeration + caps.** `list_inputs/1`, `list_outputs/1` (index+name
-via `mm_in_count`/`mm_in_name` etc.), `caps/1` returning backend atom + capability
-flags. Introduces the singleton **registry context** for ALSA enumeration (§2).
+**Slice 2 — deterministic minimidio vendoring + provenance.** *(inserted; design
+at `arc1/slice2/minimidio-vendoring-design.md`.)* Replace the hand-copied
+`c_src/minimidio.h` with a tracked, bumpable, attributed vendoring mechanism:
+SHA-pinned lock manifest, a fetch/verify script, a `make` wrapper, sha256 drift
+detection, and a two-commit attribution that credits the upstream author. Build
+hygiene that the rest of the arc rests on (every later slice compiles this header).
+
+**Slice 3 — enumeration + caps.** *(was slice 2.)* `list_inputs/1`,
+`list_outputs/1` (index+name via `mm_in_count`/`mm_in_name` etc.), `caps/1`
+returning backend atom + capability flags. Introduces the singleton **registry
+context** for ALSA enumeration (§2).
 
 ## Arc 2 — Outbound transport
 

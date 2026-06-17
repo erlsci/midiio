@@ -4,6 +4,9 @@ _checkouts
 _vendor
 .eunit
 *.o
+*.so
+*.d
+priv/*.so
 *.beam
 *.plt
 *.swp
@@ -18,3 +21,4 @@ logs
 *.iml
 rebar3.crashdump
 *~
+/workbench
