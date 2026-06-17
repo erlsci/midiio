@@ -13,7 +13,7 @@ re-runs `-on_load` → `erlang:load_nif/2` against the already-loaded NIF librar
 callback**, so that reload fails, `cover` cannot instrument `midiio.beam`, and the
 gate was neutered to `--min_coverage=0` (`rebar.config`). Net: the `check` alias's
 coverage step is currently a no-op, and every later slice inherits a disabled
-gate. (Captured as a learning in `workbench/NIF-LEARNINGS.md` L13.)
+gate. (Captured as a learning in `docs/NIF-LEARNINGS.md` L13.)
 
 ## Goal
 

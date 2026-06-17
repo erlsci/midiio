@@ -60,7 +60,7 @@ Floor set at **30** (just below the measured 33, per the prompt's small margin).
 - `F1-remediation-ledger.md`: 10/10 rows done.
 - `arc1/slice1/ledger.md` row 15 + the cover×NIF note amended (dated) to reflect
   the now-real gate.
-- `workbench/NIF-LEARNINGS.md` L13 resolved: the speculative caveat replaced with
+- `docs/NIF-LEARNINGS.md` L13 resolved: the speculative caveat replaced with
   the implemented `init_statics`/`RT_TAKEOVER` Good example and the outcome.
 
 ## Out of scope (still tracked, not bundled)

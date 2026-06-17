@@ -25,7 +25,7 @@
   of detail to take from the `nif-lifecycle` / `nif-resources` cards rather than
   from memory. If a subtlety can't be resolved cleanly, surface it (disclosed
   deferral) rather than guessing.
-- This remediation feeds `workbench/NIF-LEARNINGS.md`: confirm/expand L13 (the
+- This remediation feeds `docs/NIF-LEARNINGS.md`: confirm/expand L13 (the
   `cover`/`on_load`/upgrade gotcha) with the concrete fix that worked, and add the
   `ERL_NIF_RT_TAKEOVER` detail as a GOOD example.
 - Out of scope: F2 (test-NIF gating) and F3 (`as test` docs) — tracked separately.
