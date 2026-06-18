@@ -418,7 +418,202 @@ owner_death_reclaims_input_test_() ->
         end
     end}.
 
+%% ── arc3/slice2 Group A: set_owner atomic handoff (R1/R2) ────────────────────
+
+%% Row 2 (R2 closed): handoff to an already-dead pid → {error, owner_not_alive},
+%% and the OLD owner's monitor is preserved (the device still reclaims on the old
+%% owner's death — no leak, no silently-disarmed monitor).
+set_owner_dead_handoff_preserves_old_owner_test_() ->
+    {timeout, 30, fun() ->
+        case virtual_source_index() of
+            no_loopback -> ok;
+            {Idx, Out} ->
+                Before = midiio:uninit_count(),
+                {_C, MRef} = spawn_monitor(fun() ->
+                    {ok, In} = midiio:open_input(Idx, self()),
+                    Dead = spawn(fun() -> ok end),
+                    timer:sleep(20),  %% let Dead exit
+                    {error, owner_not_alive} = midiio:set_owner(In, Dead),
+                    ok  %% this (old) owner dies; its still-armed monitor reclaims
+                end),
+                receive {'DOWN', MRef, process, _, _} -> ok end,
+                ok = wait_until(fun() -> midiio:uninit_count() > Before end, 5000),
+                ?assert(midiio:uninit_count() > Before),
+                midiio:close(Out)
+        end
+    end}.
+
+%% Row 3: handoff to a LIVE pid re-points ownership — the NEW owner's death
+%% reclaims the device.
+set_owner_live_handoff_redirects_reclaim_test_() ->
+    {timeout, 30, fun() ->
+        case virtual_source_index() of
+            no_loopback -> ok;
+            {Idx, Out} ->
+                {ok, In} = midiio:open_input(Idx, self()),  %% test proc stays alive
+                Before = midiio:uninit_count(),
+                {P2, MRef} = spawn_monitor(fun() -> receive go -> ok end end),
+                ?assertEqual(ok, midiio:set_owner(In, P2)),
+                P2 ! go,  %% P2 dies without stop/close
+                receive {'DOWN', MRef, process, _, _} -> ok end,
+                ok = wait_until(fun() -> midiio:uninit_count() > Before end, 5000),
+                ?assert(midiio:uninit_count() > Before),
+                midiio:close(Out)
+        end
+    end}.
+
+%% ── arc3/slice2 Group B: virtual-loopback taxonomy conformance ───────────────
+
+%% Rows 7–10: every taxonomy member round-trips byte-exact through the transport
+%% (14-bit pitch bend / song position with LSB≠MSB; SysEx of varied lengths).
+taxonomy_byte_exact_loopback_test_() ->
+    {timeout, 60, fun() ->
+        with_loopback(self(), fun(_In, Out) ->
+            lists:foreach(fun(Bytes) ->
+                flush_midi_in(),
+                ?assertEqual(ok, midiio:send(Out, Bytes)),
+                receive
+                    {midi_in, _Dev, Got, Ts} ->
+                        ?assertEqual(Bytes, Got),
+                        ?assert(is_integer(Ts))
+                after 3000 -> erlang:error({loopback_timeout, Bytes})
+                end
+            end, taxonomy())
+        end)
+    end}.
+
+%% Row 11: the bytes⇄message bridge round-trips byte-exact across a generated
+%% taxonomy (both seams, no I/O). Run the PropEr property under eunit so it gates
+%% in `rebar3 as test check`; also runnable standalone via
+%% `rebar3 as test proper -m midiio_prop`.
+seam_roundtrip_property_test_() ->
+    {timeout, 120, fun() ->
+        ?assert(proper:quickcheck(midiio_prop:prop_seam_roundtrip(),
+                                  [{numtests, 300}, quiet]))
+    end}.
+
+%% ── arc3/slice2 Group C: upstream quirk cases (disclosed-tracked = pass) ──────
+
+%% Row 12: U1 — large SysEx (>~256 B) over a CoreMIDI virtual source fails
+%% (upstream stack-`MIDIPacketList` cap, MM_ERROR — no crash, no truncation).
+%% Tracked, not silent. On ALSA there is no such cap → assert byte-exact if it sends.
+u1_large_sysex_virtual_cap_test_() ->
+    {timeout, 30, fun() ->
+        with_loopback(self(), fun(_In, Out) ->
+            Big = iolist_to_binary([16#F0, binary:copy(<<16#11>>, 400), 16#F7]),
+            case backend() of
+                coremidi ->
+                    ?assertMatch({error, _}, midiio:send(Out, Big)); %% U1 cap
+                _ ->
+                    flush_midi_in(),
+                    case midiio:send(Out, Big) of
+                        ok          -> ?assertEqual([Big], collect_midi_in(500));
+                        {error, _}  -> ok %% acceptable; tracked
+                    end
+            end
+        end)
+    end}.
+
+%% Row 14: U2/R6 — vel-0 note-on (`9n nn 00`). midiio never folds it to note-off;
+%% on CoreMIDI it passes through as sent. ALSA's *backend* folds it below us (the
+%% U2 inconsistency, upstream) — disclosed, asserted per-backend.
+u2_vel0_passthrough_test_() ->
+    {timeout, 30, fun() ->
+        with_loopback(self(), fun(_In, Out) ->
+            Sent = <<16#90, 60, 0>>,
+            flush_midi_in(),
+            ok = midiio:send(Out, Sent),
+            Got = collect_midi_in(300),
+            case backend() of
+                coremidi -> ?assertEqual([Sent], Got);                %% pass-through
+                _        -> ?assert(Got =:= [Sent]                    %% no backend fold
+                                    orelse Got =:= [<<16#80, 60, 0>>]) %% ALSA folds (U2)
+            end
+        end)
+    end}.
+
+%% Row 15: U3 — a real-time `F8` interleaved mid-SysEx. The upstream read-proc
+%% defect (`minimidio.h:748–751`) absorbs an F8 into the SysEx body — BUT only when
+%% it receives a single combined `[F0 … F8 … F7]` packet. Observed over the CoreMIDI
+%% *virtual* loopback, CoreMIDI's send path splits the real-time byte out first, so
+%% the absorption does NOT reproduce here: the clock arrives as its own `<<F8>>`
+%% and no delivered SysEx body contains the F8. So U3 is **not reproducible over
+%% virtual ports** (tracked: the defect remains real for real-hardware combined
+%% packets — resolved by raw inbound framing). We assert the invariant that does
+%% hold: no delivered SysEx absorbed the F8.
+u3_realtime_in_sysex_test_() ->
+    {timeout, 30, fun() ->
+        with_loopback(self(), fun(_In, Out) ->
+            case backend() of
+                coremidi ->
+                    flush_midi_in(),
+                    ok = midiio:send(Out, <<16#F0, 16#7E, 16#F8, 16#F7>>),
+                    Got = collect_midi_in(300),
+                    AbsorbedF8 = lists:any(
+                        fun(B) -> byte_size(B) >= 1
+                                  andalso binary:first(B) =:= 16#F0
+                                  andalso binary:match(B, <<16#F8>>) =/= nomatch
+                        end, Got),
+                    ?assertNot(AbsorbedF8); %% F8 not absorbed over the virtual loopback
+                _ ->
+                    ok %% ALSA real-time-in-SysEx handling: not asserted here
+            end
+        end)
+    end}.
+
+%% Row 13: S1 — inbound SysEx spanning more than one packet. On CoreMIDI this is
+%% blocked by U1 (can't SEND >256 B over a virtual source) → not-reproducible
+%% here. On ALSA (vm-test) a large SysEx is drivable: assert one intact `F0…F7`
+%% arrives; a split/truncation would confirm S1.
+s1_multipacket_inbound_sysex_test_() ->
+    {timeout, 30, fun() ->
+        with_loopback(self(), fun(_In, Out) ->
+            case backend() of
+                coremidi ->
+                    ok; %% blocked by U1 on the virtual source — not reproducible
+                _ ->
+                    Big = iolist_to_binary([16#F0, binary:copy(<<16#22>>, 1000), 16#F7]),
+                    flush_midi_in(),
+                    case midiio:send(Out, Big) of
+                        ok         -> ?assertEqual([Big], collect_midi_in(800));
+                        {error, _} -> ok
+                    end
+            end
+        end)
+    end}.
+
 %% ── helpers ────────────────────────────────────────────────────────────────
+
+%% The backend atom for the host (coremidi/alsa/...).
+backend() ->
+    {ok, C} = midiio:context_open(),
+    B = maps:get(backend, midiio:caps(C)),
+    ok = midiio:context_close(C),
+    B.
+
+%% Collect all {midi_in,...} payloads arriving within Ms, in arrival order.
+collect_midi_in(Ms) ->
+    receive {midi_in, _Dev, Bytes, _Ts} -> [Bytes | collect_midi_in(Ms)]
+    after Ms -> []
+    end.
+
+%% The byte-exact round-trip taxonomy (below the U1 SysEx cap; large/quirk cases
+%% are Group C). 14-bit cases use LSB≠MSB so a swap or truncation would show.
+taxonomy() ->
+    [<<16#80, 60, 0>>,             %% note off
+     <<16#90, 60, 100>>,           %% note on
+     <<16#A0, 60, 64>>,            %% poly aftertouch
+     <<16#B0, 7, 127>>,            %% control change
+     <<16#C0, 5>>,                 %% program change
+     <<16#D0, 64>>,                %% channel aftertouch
+     <<16#E0, 16#7F, 16#3F>>,      %% pitch bend (14-bit, LSB 7F ≠ MSB 3F)
+     <<16#F2, 16#10, 16#20>>,      %% song position (14-bit, LSB 10 ≠ MSB 20)
+     <<16#F3, 5>>,                 %% song select
+     <<16#F6>>,                    %% tune request
+     <<16#F8>>, <<16#FA>>, <<16#FB>>, <<16#FC>>, <<16#FE>>, <<16#FF>>, %% real-time
+     <<16#F0, 16#7E, 16#7F, 16#09, 16#01, 16#F7>>,                     %% SysEx (short, 6B)
+     iolist_to_binary([16#F0, 16#7D, binary:copy(<<16#11>>, 32), 16#F7]) %% SysEx (mid, 35B)
+    ].
 
 %% Set up a virtual output source + a real input connected to it (one VM), run
 %% Body(In, Out), then tear down. Skips (no assertion) if the virtual source is

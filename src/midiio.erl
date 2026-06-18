@@ -11,12 +11,12 @@
 -on_load(init/0).
 
 -nifs([context_open/0, context_close/1, result_atom/1, uninit_count/0,
-       list_inputs/1, list_outputs/1, caps/1,
+       seam_roundtrip/1, list_inputs/1, list_outputs/1, caps/1,
        open_output/1, open_output_virtual/0, close/1, send/2,
        open_input/2, start_input/1, stop_input/1, set_owner/2]).
 
 -export([context_open/0, context_close/1, result_atom/1, uninit_count/0,
-         list_inputs/1, list_outputs/1, caps/1,
+         seam_roundtrip/1, list_inputs/1, list_outputs/1, caps/1,
          open_output/1, open_output_virtual/0, close/1, send/2,
          open_input/2, start_input/1, stop_input/1, set_owner/2]).
 
@@ -77,6 +77,12 @@ result_atom(_Code) ->
 %% uninit calls. Used by the eunit suite to verify destructor behaviour on GC.
 -spec uninit_count() -> non_neg_integer().
 uninit_count() ->
+    ?NOT_LOADED.
+
+%% @doc Test NIF: round-trip `Bytes' through both raw seams (outbound parse +
+%% inbound build) with no I/O. Used by the PropEr bytes⇄message bridge property.
+-spec seam_roundtrip(binary()) -> {ok, binary()} | {error, unsupported_status}.
+seam_roundtrip(_Bytes) ->
     ?NOT_LOADED.
 
 %% @doc List the currently-visible MIDI input ports as `{Index, Name}' pairs,
@@ -164,7 +170,11 @@ start_input(_Dev) ->
 stop_input(_Dev) ->
     ?NOT_LOADED.
 
-%% @doc Redirect a device's inbound delivery to a new owner process.
--spec set_owner(device(), pid()) -> ok.
+%% @doc Redirect a device's inbound delivery to a new owner process. The handoff
+%% is atomic: for an input device the new owner is monitored before the old is
+%% released, so if `Pid' is already dead the call returns `{error, owner_not_alive}'
+%% and the device keeps serving its current owner (the previous monitor is left
+%% intact). For an output device it simply records the owner.
+-spec set_owner(device(), pid()) -> ok | {error, owner_not_alive}.
 set_owner(_Dev, _Pid) ->
     ?NOT_LOADED.

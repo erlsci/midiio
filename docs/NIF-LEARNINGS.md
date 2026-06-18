@@ -447,6 +447,37 @@ Corollary: a NIF resource's `down` callback (`enif_monitor_process`, the
 owner-death reclaim) calls this same cleanup, so it inherits the no-deadlock
 property for free — but only because the join moved out of the lock first.
 
+## L22 — Re-pointing a process monitor must be atomic: arm-new-before-drop-old
+**Strength: SHOULD. Stage: build (arc3/slice2, R1/R2 handoff). `[GAP]`.**
+
+When a NIF lets the owning process be reassigned (`set_owner/2`) and arms an
+`enif_monitor_process` on it, the naive "demonitor old, then monitor new" order
+has two bugs: (R2) if the new pid is already dead, `enif_monitor_process` returns
+`>0`, you've already disarmed the good monitor, and you silently end up monitored
+by nobody — re-opening the very leak the monitor closes; (R1) it widens the race
+window where the *old* owner's death tears the device down after ownership moved.
+Fix: arm the new monitor into a **local** `ErlNifMonitor` first and commit (drop
+old, store new, write owner) **only on success**; on failure leave the old
+owner+monitor fully intact and return an error. Handoff becomes all-or-nothing.
+
+```c
+/* Bad - demonitor old first, then try to arm new (dead pid → no monitor, leak) */
+if (monitored) enif_demonitor_process(env, res, &res->monitor);
+res->owner = pid;
+if (enif_monitor_process(env, res, &res->owner, &res->monitor) == 0) monitored = 1;
+
+/* Good - arm new into a local first; commit only if it succeeds */
+ErlNifMonitor nm;
+if (enif_monitor_process(env, res, &pid, &nm) != 0)
+    return error_owner_not_alive;           /* old owner + monitor untouched */
+if (monitored) enif_demonitor_process(env, res, &res->monitor);
+res->monitor = nm; res->monitored = 1; res->owner = pid;
+```
+
+(`enif_monitor_process` is safe to call under the per-device lock: a dead target
+returns `>0` synchronously with no `down`; a live target's `down` is async and
+just blocks on the lock — provided that path does no `pthread_join`, cf. L21.)
+
 ---
 
 ## Open threads to resolve into learnings as the build proceeds

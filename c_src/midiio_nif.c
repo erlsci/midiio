@@ -96,6 +96,7 @@ static ERL_NIF_TERM am_no_backend;
 static ERL_NIF_TERM am_out_of_range;
 static ERL_NIF_TERM am_already_open;
 static ERL_NIF_TERM am_not_open;
+static ERL_NIF_TERM am_owner_not_alive; /* set_owner/2 handoff to a dead pid */
 static ERL_NIF_TERM am_alloc_failed;
 
 /* caps/1 map keys + boolean values + the compile-time backend atom (slice 3). */
@@ -306,6 +307,7 @@ static int init_statics(ErlNifEnv *env, ErlNifResourceFlags flags)
 
     am_unsupported_status = enif_make_atom(env, "unsupported_status");
     am_midi_in            = enif_make_atom(env, "midi_in");
+    am_owner_not_alive    = enif_make_atom(env, "owner_not_alive");
 
     return 0;
 }
@@ -401,6 +403,38 @@ static ERL_NIF_TERM uninit_count(ErlNifEnv *env, int argc,
     (void)argv;
 
     return enif_make_int(env, atomic_load(&g_uninit_count));
+}
+
+/* seam_roundtrip(Bytes) -> {ok, Bytes2} | {error, unsupported_status}
+ * Test NIF (arc3/slice2, PropEr): drive a message through BOTH raw seams purely —
+ * midiio_bytes_to_msg (outbound parse) then midiio_msg_to_bytes (inbound build),
+ * no I/O. A byte-exact round-trip over the generated taxonomy proves the
+ * bytes⇄message bridge is lossless (no dropped status, right data-byte count,
+ * 14-bit intact, SysEx byte-exact). */
+static ERL_NIF_TERM seam_roundtrip(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+
+    ErlNifBinary in;
+    if (!enif_inspect_binary(env, argv[0], &in) || in.size == 0)
+        return enif_make_badarg(env);
+
+    mm_message m;
+    if (!midiio_bytes_to_msg(in.data, in.size, &m))
+        return enif_make_tuple2(env, am_error, am_unsupported_status);
+
+    ERL_NIF_TERM out;
+    if (m.type == MM_SYSEX) {
+        unsigned char *p = enif_make_new_binary(env, m.sysex_size, &out);
+        if (m.sysex_size > 0)
+            memcpy(p, m.sysex, m.sysex_size);
+    } else {
+        uint8_t  buf[3];
+        size_t   n = midiio_msg_to_bytes(&m, buf);
+        unsigned char *p = enif_make_new_binary(env, n, &out);
+        memcpy(p, buf, n);
+    }
+    return enif_make_tuple2(env, am_ok, out);
 }
 
 /* ── Enumeration + capabilities (slice 3, read-only) ────────────────────────── */
@@ -715,10 +749,16 @@ static ERL_NIF_TERM stop_input(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv
     return am_ok;
 }
 
-/* set_owner(Dev, Pid) -> ok. Writes owner under the per-device lock (the recv
- * thread reads it under the same lock). For inputs, re-point the owner-death
- * monitor at the new pid: demonitor the old, monitor the new — all under the lock
- * so the recv thread never reads a half-updated owner. */
+/* set_owner(Dev, Pid) -> ok | {error, owner_not_alive}. Re-points an input's
+ * owner-death monitor ATOMICALLY (R1/R2 hardening, arc3/slice2): arm the new
+ * monitor into a LOCAL ErlNifMonitor first, and only commit (drop the old, store
+ * the new, write owner) if it succeeds. On failure the old owner + monitor are
+ * left fully intact and we return {error, owner_not_alive} — so handing off to an
+ * already-dead pid can no longer disarm a good monitor or silently leak (R2), and
+ * a racing old-owner death after a successful re-point hits the new monitor, not a
+ * spurious cleanup (R1 narrows to the irreducible ERTS demonitor window). All
+ * under the lock so the recv thread never reads a half-updated owner. Outputs
+ * (is_input false) never monitor — they just write owner. */
 static ERL_NIF_TERM set_owner(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
     (void)argc;
@@ -730,14 +770,22 @@ static ERL_NIF_TERM set_owner(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[
         return enif_make_badarg(env);
 
     enif_mutex_lock(res->lock);
-    if (res->monitored) {
-        enif_demonitor_process(env, res, &res->monitor);
-        res->monitored = 0;
+    if (res->is_input) {
+        ErlNifMonitor new_mon;
+        /* >0 = target not alive, <0 = no down callback (can't happen — we set one).
+         * Calling this under res->lock is safe: a dead target returns synchronously
+         * with no down; a live target's down is async and would just block on the
+         * lock until we release (no join on this path → no deadlock). */
+        if (enif_monitor_process(env, res, &pid, &new_mon) != 0) {
+            enif_mutex_unlock(res->lock); /* old owner + monitor untouched */
+            return enif_make_tuple2(env, am_error, am_owner_not_alive);
+        }
+        if (res->monitored)
+            enif_demonitor_process(env, res, &res->monitor);
+        res->monitor   = new_mon;
+        res->monitored = 1;
     }
     res->owner = pid;
-    if (res->is_input &&
-        enif_monitor_process(env, res, &res->owner, &res->monitor) == 0)
-        res->monitored = 1; /* new owner alive → re-armed (else left unmonitored) */
     enif_mutex_unlock(res->lock);
     return am_ok;
 }
@@ -839,6 +887,7 @@ static ErlNifFunc nif_funcs[] = {
     {"context_close",      1, context_close},
     {"result_atom",        1, result_atom},
     {"uninit_count",       0, uninit_count},
+    {"seam_roundtrip",     1, seam_roundtrip},
     {"list_inputs",        1, list_inputs},
     {"list_outputs",       1, list_outputs},
     {"caps",               1, caps},

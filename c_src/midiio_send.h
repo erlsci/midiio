@@ -64,45 +64,58 @@ static inline int midiio_expected_len(uint8_t b)
  * TODO(upstream): when native mm_out_send_raw(dev, bytes, len) ships, replace this
  * entire body with `return mm_out_send_raw(dev, bytes, len);` and delete the
  * adapter — nothing above the seam changes (ledger row 19). */
-static inline mm_result midiio_dev_send_raw(mm_device *dev,
-                                            const uint8_t *bytes, size_t len)
+/* The parse half of the seam: wire bytes → mm_message. Returns 1 if framed, 0 if
+ * the leading status byte is unframable (0xF4/F5/F7/F9/FD). For SysEx it points
+ * m->sysex at `bytes` (no copy — the caller owns the buffer's lifetime). This is
+ * the exact inverse of midiio_recv.h's midiio_msg_to_bytes, and factoring it out
+ * lets the bytes⇄message round-trip be tested purely (seam_roundtrip test NIF +
+ * PropEr) without driving real I/O. */
+static inline int midiio_bytes_to_msg(const uint8_t *bytes, size_t len, mm_message *m)
 {
     uint8_t b = bytes[0];
+    memset(m, 0, sizeof *m);
 
-    /* SysEx: hand the whole binary (0xF0 … 0xF7) through unchanged; minimidio
-     * memcpys it into the per-device buffer and bounds-checks the size. */
-    if (b == 0xF0)
-        return mm_out_send_sysex(dev, bytes, len);
-
-    mm_message m;
-    memset(&m, 0, sizeof m);
+    /* SysEx: the whole binary (0xF0 … 0xF7), pointed-to not copied. */
+    if (b == 0xF0) {
+        m->type = MM_SYSEX;
+        m->sysex = bytes;
+        m->sysex_size = len;
+        return 1;
+    }
 
     /* Channel voice (0x80–0xEF): type = (status>>4)&0xF, channel = status&0xF.
      * mm_make_message fills exactly this; the unused data byte stays 0 for the
-     * 2-byte statuses (program change / channel pressure), which mm_out_send
-     * ignores. */
+     * 2-byte statuses (program change / channel pressure). */
     if (b >= 0x80 && b <= 0xEF) {
-        m = mm_make_message(b, len >= 2 ? bytes[1] : 0, len >= 3 ? bytes[2] : 0);
-        return mm_out_send(dev, &m);
+        *m = mm_make_message(b, len >= 2 ? bytes[1] : 0, len >= 3 ? bytes[2] : 0);
+        return 1;
     }
 
-    /* System common + real-time: unique enum types (NOT a nibble shift), filled
-     * by hand. mm_make_message would set the wrong type here (minimidio.h:264). */
+    /* System common + real-time: unique enum types (NOT a nibble shift). */
     switch (b) {
-        case 0xF1: m.type = MM_MTC_QUARTER_FRAME; m.data[0] = bytes[1]; break;
-        case 0xF2: m.type = MM_SONG_POSITION;
-                   m.song_position = (uint16_t)(bytes[1] | (bytes[2] << 7)); break;
-        case 0xF3: m.type = MM_SONG_SELECT;       m.data[0] = bytes[1]; break;
-        case 0xF6: m.type = MM_TUNE_REQUEST; break;
-        case 0xF8: m.type = MM_CLOCK;        break;
-        case 0xFA: m.type = MM_START;        break;
-        case 0xFB: m.type = MM_CONTINUE;     break;
-        case 0xFC: m.type = MM_STOP;         break;
-        case 0xFE: m.type = MM_ACTIVE_SENSE; break;
-        case 0xFF: m.type = MM_RESET;        break;
-        default:   /* 0xF4 0xF5 0xF7 0xF9 0xFD — unframable */
-            return (mm_result)MIDIIO_UNSUPPORTED_STATUS;
+        case 0xF1: m->type = MM_MTC_QUARTER_FRAME; m->data[0] = bytes[1]; return 1;
+        case 0xF2: m->type = MM_SONG_POSITION;
+                   m->song_position = (uint16_t)(bytes[1] | (bytes[2] << 7)); return 1;
+        case 0xF3: m->type = MM_SONG_SELECT;       m->data[0] = bytes[1]; return 1;
+        case 0xF6: m->type = MM_TUNE_REQUEST; return 1;
+        case 0xF8: m->type = MM_CLOCK;        return 1;
+        case 0xFA: m->type = MM_START;        return 1;
+        case 0xFB: m->type = MM_CONTINUE;     return 1;
+        case 0xFC: m->type = MM_STOP;         return 1;
+        case 0xFE: m->type = MM_ACTIVE_SENSE; return 1;
+        case 0xFF: m->type = MM_RESET;        return 1;
+        default:   return 0;                  /* 0xF4/F5/F7/F9/FD — unframable */
     }
+}
+
+static inline mm_result midiio_dev_send_raw(mm_device *dev,
+                                            const uint8_t *bytes, size_t len)
+{
+    mm_message m;
+    if (!midiio_bytes_to_msg(bytes, len, &m))
+        return (mm_result)MIDIIO_UNSUPPORTED_STATUS;
+    if (m.type == MM_SYSEX)
+        return mm_out_send_sysex(dev, m.sysex, m.sysex_size);
     return mm_out_send(dev, &m);
 }
 
