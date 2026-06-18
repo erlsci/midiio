@@ -376,6 +376,48 @@ f1_send_vs_close_tripwire_test_() ->
         ?assert(true)   %% reached here ⇒ no UAF crashed the VM
     end}.
 
+%% Remediation row 2 (S1): close an input WHILE delivery is active must not hang.
+%% On ALSA `mm_in_stop` pthread_joins the recv thread, so pre-fix (join under
+%% res->lock, which recv_cb also takes) this deadlocks; the fix joins outside the
+%% lock. On CoreMIDI `mm_in_stop` doesn't join, so on macOS this exercises the
+%% close-vs-active-delivery path cleanly and the real deadlock tripwire is the
+%% Linux leg (make vm-test / CI). The {timeout,_} would trip a pre-fix ALSA hang.
+close_during_active_delivery_test_() ->
+    {timeout, 60, fun() ->
+        lists:foreach(fun(_) ->
+            with_loopback(self(), fun(In, Out) ->
+                Flood = spawn(fun() -> flood(Out) end),
+                timer:sleep(3),
+                ok = midiio:close(In),   %% must return, not hang
+                exit(Flood, kill),
+                flush_midi_in()
+            end)
+        end, lists:seq(1, 20)),
+        ?assert(true)
+    end}.
+
+%% Remediation row 9 (S2): a started input whose owner dies WITHOUT stop/close is
+%% reclaimed by the enif_monitor down callback — uninit_count increments (the same
+%% counter the slice-1 GC tests use), no leak.
+owner_death_reclaims_input_test_() ->
+    {timeout, 30, fun() ->
+        case virtual_source_index() of
+            no_loopback ->
+                ok; %% headless: virtual source not enumerable — skip
+            {Idx, Out} ->
+                Before = midiio:uninit_count(),
+                {_Pid, MRef} = spawn_monitor(fun() ->
+                    {ok, In} = midiio:open_input(Idx, self()),
+                    ok = midiio:start_input(In),
+                    ok  %% die WITHOUT stop/close
+                end),
+                receive {'DOWN', MRef, process, _, _} -> ok end,
+                ok = wait_until(fun() -> midiio:uninit_count() > Before end, 5000),
+                ?assert(midiio:uninit_count() > Before),
+                midiio:close(Out)
+        end
+    end}.
+
 %% ── helpers ────────────────────────────────────────────────────────────────
 
 %% Set up a virtual output source + a real input connected to it (one VM), run
@@ -408,6 +450,38 @@ send_loop(_Dev, 0) -> ok;
 send_loop(Dev, N) ->
     catch midiio:send(Dev, <<16#90, 60, 100>>),
     send_loop(Dev, N - 1).
+
+%% Tight unbounded send loop (until the process is killed) for the deadlock test.
+flood(Dev) ->
+    catch midiio:send(Dev, <<16#90, 60, 100>>),
+    flood(Dev).
+
+%% Drain any delivered {midi_in, ...} from the mailbox.
+flush_midi_in() ->
+    receive {midi_in, _, _, _} -> flush_midi_in() after 0 -> ok end.
+
+%% The input index of a freshly-created virtual output source (so a separate
+%% process can open_input it), plus the source handle to close. no_loopback if the
+%% virtual source isn't enumerable on this backend.
+virtual_source_index() ->
+    {ok, Out} = midiio:open_output_virtual(),
+    {ok, Ctx} = midiio:context_open(),
+    Ins = midiio:list_inputs(Ctx),
+    ok = midiio:context_close(Ctx),
+    case [I || {I, N} <- Ins,
+               binary:match(N, <<"midiio-out:virtual">>) =/= nomatch] of
+        [Idx | _] -> {Idx, Out};
+        []        -> catch midiio:close(Out), no_loopback
+    end.
+
+%% Poll Pred until true or the budget (ms) runs out.
+wait_until(Pred, Ms) when Ms =< 0 ->
+    case Pred() of true -> ok; false -> timeout end;
+wait_until(Pred, Ms) ->
+    case Pred() of
+        true  -> ok;
+        false -> timer:sleep(25), wait_until(Pred, Ms - 25)
+    end.
 
 %% A port list is a list of {non_neg_integer(), binary()} (possibly empty).
 assert_port_list(L) ->

@@ -63,13 +63,15 @@ static ErlNifResourceType *g_ctx_res_type = NULL;
  *    Uncontended under the single-owner contract (DESIGN §4 D3 realtime intent).
  *    Created in every open_*; destroyed LAST in the destructor (never while held). */
 typedef struct {
-    mm_context   ctx;
-    mm_device    dev;
-    int          live;
-    int          is_input;
-    int          kept;
-    ErlNifPid    owner;
-    ErlNifMutex *lock;
+    mm_context    ctx;
+    mm_device     dev;
+    int           live;
+    int           is_input;
+    int           kept;
+    int           monitored;   /* an owner-death monitor is armed (inputs only) */
+    ErlNifPid     owner;
+    ErlNifMonitor monitor;     /* fires down_device when the owner process dies */
+    ErlNifMutex  *lock;
 } midiio_dev_res;
 
 static ErlNifResourceType *g_dev_res_type = NULL;
@@ -164,41 +166,60 @@ static void dtor_context(ErlNifEnv *env, void *obj)
  * 0 if the device was already not live. */
 static int do_dev_cleanup(midiio_dev_res *res)
 {
-    int did = 0;
-    int release_keep = 0;
-
     if (res->lock == NULL)
         return 0; /* never fully constructed (mutex create failed at open) */
 
+    /* The lock guards ONLY the live flip (exactly-once) and the kept snapshot.
+     * The teardown — including mm_in_stop, which on ALSA pthread_joins the recv
+     * thread — runs OUTSIDE the lock, because recv_cb needs this same lock to read
+     * `owner`. Joining while holding it deadlocks close-vs-active-delivery (S1).
+     * The keep is still held across the teardown (released LAST), so an in-flight
+     * recv_cb keeps `res` valid until the join completes. */
     enif_mutex_lock(res->lock);
-    if (res->live) {
-        if (res->is_input) {
-            mm_in_stop(&res->dev);   /* no more callbacks before we close/free */
-            mm_in_close(&res->dev);
-        } else {
-            mm_out_close(&res->dev);
-        }
-        mm_context_uninit(&res->ctx); /* port first, then the per-device context */
+    int was_live = res->live;
+    if (was_live)
         res->live = 0;
-        atomic_fetch_add(&g_uninit_count, 1);
-        did = 1;
-    }
-    /* Release the recv-thread keep exactly once, after the device is torn down
-     * (callbacks have stopped). Whichever of stop_input/close/dtor first reaches
-     * here does it. */
+    int release_keep = 0;
     if (res->kept) {
         res->kept = 0;
         release_keep = 1;
     }
     enif_mutex_unlock(res->lock);
 
-    /* enif_release_resource OUTSIDE the lock. Safe from re-entrancy: this only
-     * drops to refcount 0 (triggering the dtor) when called from a context where
-     * the Erlang term is already gone — and then `kept` was already 0, so no
-     * release happens here. */
+    if (was_live) {
+        if (res->is_input) {
+            mm_in_stop(&res->dev);    /* joins the recv thread — outside the lock */
+            mm_in_close(&res->dev);
+        } else {
+            mm_out_close(&res->dev);
+        }
+        mm_context_uninit(&res->ctx); /* port first, then the per-device context */
+        atomic_fetch_add(&g_uninit_count, 1);
+    }
+
+    /* Release the recv-thread keep LAST — after the join, so `res` stayed valid
+     * for any in-flight callback. Exactly once (kept-guarded above). */
     if (release_keep)
         enif_release_resource(res);
-    return did;
+    return was_live;
+}
+
+/* The owner-death monitor's down callback (S2 close). Fires when a monitored
+ * owner process dies. The resource is guaranteed alive for the duration of this
+ * callback (the runtime holds it), so reclaiming via the guarded do_dev_cleanup
+ * is safe: it stops the recv thread (join outside the lock, Fix 1), closes, and
+ * releases the keep LAST — `res` is not touched after that release. The monitor
+ * has already fired, so no demonitor is needed. Idempotent with an explicit
+ * close: both funnel through the live-guarded do_dev_cleanup, so exactly one
+ * tears down (nif-resources: resource alive during down → let the dtor reclaim). */
+static void down_device(ErlNifEnv *env, void *obj, ErlNifPid *pid, ErlNifMonitor *mon)
+{
+    (void)env;
+    (void)pid;
+    (void)mon;
+    midiio_dev_res *res = (midiio_dev_res *)obj;
+    res->monitored = 0;
+    do_dev_cleanup(res);
 }
 
 static void dtor_device(ErlNifEnv *env, void *obj)
@@ -238,10 +259,20 @@ static int init_statics(ErlNifEnv *env, ErlNifResourceFlags flags)
         return -1;
     g_ctx_res_type = rt;
 
-    /* The device type is registered the same way (CREATE on load, TAKEOVER on
-     * upgrade) so it survives the F1 reload path. */
-    ErlNifResourceType *dt = enif_open_resource_type(
-        env, NULL, "midiio_device", dtor_device, flags, NULL);
+    /* The device type carries a `down` callback (S2: reclaim a started input
+     * whose owner died), so it is registered via the init-struct form
+     * (enif_init_resource_type). members=3 → {dtor, stop, down}; stop is NULL.
+     * Same flags as the context type (CREATE on load, TAKEOVER on upgrade) so it
+     * survives the F1 reload path. */
+    ErlNifResourceTypeInit dev_init = {
+        dtor_device,  /* dtor */
+        NULL,         /* stop */
+        down_device,  /* down */
+        3,            /* members: dtor + stop + down are provided */
+        NULL          /* dyncall */
+    };
+    ErlNifResourceType *dt = enif_init_resource_type(
+        env, "midiio_device", &dev_init, flags, NULL);
     if (dt == NULL)
         return -1;
     g_dev_res_type = dt;
@@ -625,9 +656,19 @@ static ERL_NIF_TERM open_input(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv
     }
 
     /* The backend thread now holds res as userdata: keep it across the callback's
-     * lifetime. Released exactly once after mm_in_stop (stop_input/close/dtor). */
+     * lifetime. Released exactly once after mm_in_stop (stop_input/close/dtor/down). */
     enif_keep_resource(res);
     res->kept = 1;
+
+    /* S2: monitor the owner so a started-and-abandoned input (owner drops the
+     * handle without stop/close) is reclaimed via down_device, not leaked. A
+     * non-zero return means no monitor was armed — >0 is "owner already dead", so
+     * reclaim now and report not_open (the device cannot serve a dead owner). */
+    if (enif_monitor_process(env, res, &res->owner, &res->monitor) != 0) {
+        do_dev_cleanup(res); /* stops/closes + releases the keep */
+        return enif_make_tuple2(env, am_error, am_not_open);
+    }
+    res->monitored = 1;
 
     return device_ok(env, res);
 }
@@ -675,7 +716,9 @@ static ERL_NIF_TERM stop_input(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv
 }
 
 /* set_owner(Dev, Pid) -> ok. Writes owner under the per-device lock (the recv
- * thread reads it under the same lock). */
+ * thread reads it under the same lock). For inputs, re-point the owner-death
+ * monitor at the new pid: demonitor the old, monitor the new — all under the lock
+ * so the recv thread never reads a half-updated owner. */
 static ERL_NIF_TERM set_owner(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
     (void)argc;
@@ -687,7 +730,14 @@ static ERL_NIF_TERM set_owner(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[
         return enif_make_badarg(env);
 
     enif_mutex_lock(res->lock);
+    if (res->monitored) {
+        enif_demonitor_process(env, res, &res->monitor);
+        res->monitored = 0;
+    }
     res->owner = pid;
+    if (res->is_input &&
+        enif_monitor_process(env, res, &res->owner, &res->monitor) == 0)
+        res->monitored = 1; /* new owner alive → re-armed (else left unmonitored) */
     enif_mutex_unlock(res->lock);
     return am_ok;
 }

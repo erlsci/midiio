@@ -414,6 +414,39 @@ per-device lock) *after* `mm_in_stop` (no callback can fire then), in whichever 
 stop/close/dtor reaches it first. Prompt monitor-based cleanup
 (`enif_monitor_process`) is the real fix; until then this is a documented residual.
 
+## L21 — Never `pthread_join` a callback-bearing thread while holding a lock the callback takes
+**Strength: MUST. Stage: build (arc3/slice1 remediation, S1 deadlock). `[GAP]`.**
+
+The per-device lock (L19/F1) guards `recv_cb`'s `owner` read. The first cut of
+`do_dev_cleanup` held that lock across the whole teardown — including `mm_in_stop`,
+which on **ALSA `pthread_join`s the recv thread**. Close-during-active-delivery
+then deadlocks: the closing thread holds the lock and waits (join) for the recv
+thread to exit, while the recv thread is blocked trying to take that same lock to
+read `owner`. (It hides on macOS — CoreMIDI's `mm_in_stop` just disconnects, no
+join — so only an ALSA/`vm-test` run reproduces it.) The fix: the lock guards
+**only** the `live` flip (exactly-once) + the keep snapshot; the teardown/join runs
+**outside** the lock. The keep is released **last** (after the join), so an
+in-flight callback keeps the resource valid until the join completes.
+
+```c
+/* Bad - join (mm_in_stop) inside the lock the callback also takes → deadlock */
+enif_mutex_lock(r->lock);
+if (r->live) { mm_in_stop(&r->dev); /* joins recv thread that wants r->lock */ ... }
+enif_mutex_unlock(r->lock);
+
+/* Good - flip live under the lock; join OUTSIDE it; release the keep last */
+enif_mutex_lock(r->lock);
+int was_live = r->live; if (was_live) r->live = 0;
+int rel = r->kept; r->kept = 0;
+enif_mutex_unlock(r->lock);
+if (was_live) { mm_in_stop(&r->dev); mm_in_close(&r->dev); mm_context_uninit(&r->ctx); }
+if (rel) enif_release_resource(r);   /* after the join: in-flight cb stayed valid */
+```
+
+Corollary: a NIF resource's `down` callback (`enif_monitor_process`, the
+owner-death reclaim) calls this same cleanup, so it inherits the no-deadlock
+property for free — but only because the join moved out of the lock first.
+
 ---
 
 ## Open threads to resolve into learnings as the build proceeds
