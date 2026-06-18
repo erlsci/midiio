@@ -21,6 +21,10 @@
 #define MINIMIDIO_IMPLEMENTATION
 #include "../minimidio.h"
 
+/* The raw send seam (arc2/slice2). The harness drives the same seam the NIF does
+ * — this is exactly what makes a single mm_device*-typed seam worthwhile. */
+#include "../midiio_send.h"
+
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -111,6 +115,50 @@ int main(void)
         assert(mm_context_init(&ctx, "midiio-out:asan-fail") == MM_SUCCESS);
         assert(mm_out_open(&ctx, &dev, 0x7fffffffu) == MM_OUT_OF_RANGE);
         assert(mm_context_uninit(&ctx) == MM_SUCCESS); /* clean up the context */
+    }
+
+    /* Send path (arc 2 slice 2): drive the raw seam over a representative byte
+     * set — every channel type, every system common/real-time byte, and a small
+     * SysEx (the memcpy-into-the-4096-buffer path) — on a virtual output, looped
+     * for leak/use-after-free detection over the adapter's struct-build + memcpy
+     * work. 0xF4 exercises the unframable branch (returns the sentinel, no send).
+     * This is the same midiio_dev_send_raw the NIF calls (midiio_send.h). */
+    {
+        static const struct { uint8_t b[8]; size_t len; mm_result want; } msgs[] = {
+            {{0x90, 60, 100}, 3, MM_SUCCESS},   /* note on          */
+            {{0x80, 60,   0}, 3, MM_SUCCESS},   /* note off         */
+            {{0xA0, 60,  64}, 3, MM_SUCCESS},   /* poly pressure    */
+            {{0xB0,  7, 127}, 3, MM_SUCCESS},   /* control change   */
+            {{0xC0,  5},      2, MM_SUCCESS},   /* program change   */
+            {{0xD0, 64},      2, MM_SUCCESS},   /* channel pressure */
+            {{0xE0,  0,  64}, 3, MM_SUCCESS},   /* pitch bend       */
+            {{0xF1, 0x10},    2, MM_SUCCESS},   /* MTC quarter frame*/
+            {{0xF2, 0x10, 0x20}, 3, MM_SUCCESS},/* song position    */
+            {{0xF3,  5},      2, MM_SUCCESS},   /* song select      */
+            {{0xF6},          1, MM_SUCCESS},   /* tune request     */
+            {{0xF8},          1, MM_SUCCESS},   /* clock            */
+            {{0xFA},          1, MM_SUCCESS},   /* start            */
+            {{0xFB},          1, MM_SUCCESS},   /* continue         */
+            {{0xFC},          1, MM_SUCCESS},   /* stop             */
+            {{0xFE},          1, MM_SUCCESS},   /* active sense     */
+            {{0xFF},          1, MM_SUCCESS},   /* reset            */
+            {{0xF4,  1,   2}, 3, (mm_result)MIDIIO_UNSUPPORTED_STATUS}, /* unframable */
+        };
+        static const uint8_t sysex[] = {0xF0, 0x7E, 0x7F, 0x09, 0x01, 0xF7};
+
+        mm_context ctx;
+        mm_device  dev;
+        assert(mm_context_init(&ctx, "midiio-out:asan-send") == MM_SUCCESS);
+        assert(mm_out_open_virtual(&ctx, &dev) == MM_SUCCESS);
+
+        for (int i = 0; i < 200; i++) {
+            for (size_t j = 0; j < sizeof(msgs) / sizeof(msgs[0]); j++)
+                assert(midiio_dev_send_raw(&dev, msgs[j].b, msgs[j].len) == msgs[j].want);
+            assert(midiio_dev_send_raw(&dev, sysex, sizeof sysex) == MM_SUCCESS);
+        }
+
+        assert(mm_out_close(&dev) == MM_SUCCESS);
+        assert(mm_context_uninit(&ctx) == MM_SUCCESS);
     }
 
     printf("ASAN-OK\n");

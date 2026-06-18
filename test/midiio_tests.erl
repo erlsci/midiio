@@ -210,6 +210,74 @@ open_output_real_hardware_test_() ->
         end
     end).
 
+%% ── arc2/slice2: send/2 over the raw seam ───────────────────────────────────
+%% Verified by shape + error here; byte-exact *receipt* is arc-3 (no inbound path
+%% yet — see the closing report). All need a live virtual output, so they ride the
+%% runtime/1 gate; on macOS the virtual source emits with no destination.
+
+%% Row 3: channel-voice messages route through mm_out_send and return ok.
+send_channel_messages_test_() ->
+    with_out(fun(D) ->
+        ?assertEqual(ok, midiio:send(D, <<16#90, 60, 100>>)),   %% note on
+        ?assertEqual(ok, midiio:send(D, <<16#80, 60,   0>>)),   %% note off
+        ?assertEqual(ok, midiio:send(D, <<16#A0, 60,  64>>)),   %% poly pressure
+        ?assertEqual(ok, midiio:send(D, <<16#B0,  7, 127>>)),   %% control change
+        ?assertEqual(ok, midiio:send(D, <<16#C0,  5>>)),        %% program change (2-byte)
+        ?assertEqual(ok, midiio:send(D, <<16#D0, 64>>)),        %% channel pressure (2-byte)
+        ?assertEqual(ok, midiio:send(D, <<16#E0,  0,  64>>))    %% pitch bend
+    end).
+
+%% Row 4: a complete SysEx routes through mm_out_send_sysex and returns ok.
+send_sysex_test_() ->
+    with_out(fun(D) ->
+        ?assertEqual(ok, midiio:send(D, <<16#F0, 16#7E, 16#7F, 16#09, 16#01, 16#F7>>))
+    end).
+
+%% Row 5: system common + real-time bytes map to the right type and return ok.
+send_system_bytes_test_() ->
+    with_out(fun(D) ->
+        ?assertEqual(ok, midiio:send(D, <<16#F1, 16#10>>)),        %% MTC quarter frame
+        ?assertEqual(ok, midiio:send(D, <<16#F2, 16#10, 16#20>>)), %% song position (14-bit)
+        ?assertEqual(ok, midiio:send(D, <<16#F3, 5>>)),            %% song select
+        ?assertEqual(ok, midiio:send(D, <<16#F6>>)),               %% tune request
+        [?assertEqual(ok, midiio:send(D, <<B>>))                   %% real-time bytes
+         || B <- [16#F8, 16#FA, 16#FB, 16#FC, 16#FE, 16#FF]]
+    end).
+
+%% Row 6: a closed device → {error, not_open}, no crash.
+send_closed_device_test_() ->
+    runtime(fun() ->
+        {ok, D} = midiio:open_output_virtual(),
+        ok = midiio:close(D),
+        ?assertEqual({error, not_open}, midiio:send(D, <<16#90, 60, 100>>))
+    end).
+
+%% Row 7: unrecognized/unframable leading status → {error, {unsupported_status, B}}
+%% (B is the integer status byte, never an atom).
+send_unsupported_status_test_() ->
+    with_out(fun(D) ->
+        ?assertEqual({error, {unsupported_status, 16#F4}},
+                     midiio:send(D, <<16#F4, 1, 2>>)),
+        [?assertEqual({error, {unsupported_status, B}}, midiio:send(D, <<B>>))
+         || B <- [16#F5, 16#F9, 16#FD]]
+    end).
+
+%% Row 8: SysEx larger than MM_SYSEX_BUF_SIZE (4096) → {error, invalid_arg}.
+send_oversized_sysex_test_() ->
+    with_out(fun(D) ->
+        Payload = binary:copy(<<0>>, 5000),
+        ?assertEqual({error, invalid_arg},
+                     midiio:send(D, <<16#F0, Payload/binary, 16#F7>>))
+    end).
+
+%% Row 9: malformed input crashes (let-it-crash, §6) — never swallowed.
+send_malformed_crashes_test_() ->
+    with_out(fun(D) ->
+        ?assertError(badarg, midiio:send(D, <<16#90, 60>>)),  %% short channel message
+        ?assertError(badarg, midiio:send(D, <<60, 100>>)),    %% leading data byte
+        ?assertError(badarg, midiio:send(D, <<>>))            %% empty binary
+    end).
+
 %% ── runtime-availability gate ───────────────────────────────────────────────
 %% Every test above that opens a real context or device needs a working MIDI
 %% backend. On ALSA that means the kernel sequencer node /dev/snd/seq must exist
@@ -263,6 +331,14 @@ open_and_die(Body) ->
         Body(R)
     end),
     receive {'DOWN', MRef, process, _, _} -> ok end.
+
+%% Open a virtual output, run Body(Dev), then close it — for the send tests.
+%% Headless-safe via the slice-1 virtual scaffolding; rides the runtime/1 gate.
+with_out(Body) ->
+    runtime(fun() ->
+        {ok, D} = midiio:open_output_virtual(),
+        try Body(D) after midiio:close(D) end
+    end).
 
 %% Same, for a (virtual) output device.
 open_device_and_die(Body) ->

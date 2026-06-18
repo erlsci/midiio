@@ -1,9 +1,10 @@
 %%% @doc Cross-platform realtime MIDI I/O for the BEAM via a NIF over the
 %%% minimidio C library (raw transport; no message codec).
 %%%
-%%% Surface so far: open/close an opaque per-call MIDI context (slice 1) and
-%%% read-only discovery — `list_inputs/1', `list_outputs/1', `caps/1' (slice 3).
-%%% Opening devices and send/recv arrive in later arcs.
+%%% Surface so far: open/close an opaque per-call MIDI context and read-only
+%%% discovery — `list_inputs/1', `list_outputs/1', `caps/1' (arc 1); open/close an
+%%% output device (arc 2 slice 1); and `send/2', the outbound data path (arc 2
+%%% slice 2). Inbound (recv) arrives in arc 3.
 %%% @end
 -module(midiio).
 
@@ -11,11 +12,11 @@
 
 -nifs([context_open/0, context_close/1, result_atom/1, uninit_count/0,
        list_inputs/1, list_outputs/1, caps/1,
-       open_output/1, open_output_virtual/0, close/1]).
+       open_output/1, open_output_virtual/0, close/1, send/2]).
 
 -export([context_open/0, context_close/1, result_atom/1, uninit_count/0,
          list_inputs/1, list_outputs/1, caps/1,
-         open_output/1, open_output_virtual/0, close/1]).
+         open_output/1, open_output_virtual/0, close/1, send/2]).
 
 %% NOTE (F2, disclosed-deferred in arc1/slice5): result_atom/1, uninit_count/0,
 %% and open_output_virtual/0 are test-only introspection/scaffolding NIFs. Gating
@@ -113,4 +114,26 @@ open_output_virtual() ->
 %% `{error, not_open}' if it was already closed.
 -spec close(device()) -> ok | {error, not_open}.
 close(_Dev) ->
+    ?NOT_LOADED.
+
+%% @doc Send one complete MIDI message to an open output device, byte-exact and
+%% with no normalization (R6). `Bytes' is a single status-complete message, status
+%% byte first; `send/2' routes normal-vs-SysEx internally (the split is not in the
+%% API, R4):
+%% ```
+%%   midiio:send(Dev, <<16#90, 60, 100>>).            %% note-on,  channel 0
+%%   midiio:send(Dev, <<16#F0, 16#7E, 16#F7>>).       %% a complete SysEx
+%% '''
+%% Runs on a dirty I/O scheduler so a blocking backend drain never ties up a
+%% normal scheduler. Returns `{error, not_open}' if the device is closed or is an
+%% input; `{error, {unsupported_status, B}}' for a reserved/unframable leading
+%% status byte (`16#F4', `16#F5', `16#F7', `16#F9', `16#FD'); and
+%% `{error, invalid_arg}' for a SysEx larger than the 4096-byte backend buffer.
+%% Malformed input — an empty binary, a leading data byte, or a known status with
+%% the wrong length — raises (let-it-crash; the encoder upstream must not produce
+%% it).
+-spec send(device(), binary()) -> ok | {error, not_open}
+                                     | {error, {unsupported_status, byte()}}
+                                     | {error, invalid_arg}.
+send(_Dev, _Bytes) ->
     ?NOT_LOADED.

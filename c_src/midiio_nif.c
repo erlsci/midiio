@@ -3,8 +3,10 @@
  *
  * arc1/slice1: load callback + per-call context resource lifecycle.
  * arc1/slice3: read-only discovery — list_inputs/1, list_outputs/1, caps/1.
- * No device open, no I/O, no dirty NIFs, no enif_send, no threads.
- * See docs/planning/v0.1.0/arc1/ for the slice docs and ledgers.
+ * arc2/slice1: output device resource + lifecycle (open_output/close).
+ * arc2/slice2: send/2 over the raw seam (midiio_send.h), the first dirty NIF.
+ * No inbound / recv / enif_send / owner pid yet (arc 3).
+ * See docs/planning/v0.1.0/ for the slice docs and ledgers.
  */
 
 #define MINIMIDIO_IMPLEMENTATION
@@ -12,6 +14,10 @@
 
 #include <erl_nif.h>
 #include <string.h>
+
+/* The raw send seam + interim adapter (arc2/slice2). Included after minimidio.h
+ * because it uses mm_device / mm_message / mm_out_send. */
+#include "midiio_send.h"
 
 /* Compile-time backend atom name, picked by minimidio's platform macro
  * (defined in minimidio.h before the public structs). */
@@ -81,6 +87,10 @@ static ERL_NIF_TERM am_midi2;
 static ERL_NIF_TERM am_virtual_in;
 static ERL_NIF_TERM am_virtual_out;
 static ERL_NIF_TERM g_backend_atom;
+
+/* send/2 (slice 2): the tag atom for {error, {unsupported_status, B}}. B is an
+ * integer in the tuple, never an atom — we never build atoms from runtime input. */
+static ERL_NIF_TERM am_unsupported_status;
 
 /* ── Helpers ────────────────────────────────────────────────────────────── */
 
@@ -209,6 +219,8 @@ static int init_statics(ErlNifEnv *env, ErlNifResourceFlags flags)
     am_virtual_in   = enif_make_atom(env, "virtual_in");
     am_virtual_out  = enif_make_atom(env, "virtual_out");
     g_backend_atom  = enif_make_atom(env, MIDIIO_BACKEND);
+
+    am_unsupported_status = enif_make_atom(env, "unsupported_status");
 
     return 0;
 }
@@ -488,6 +500,77 @@ static ERL_NIF_TERM close_device(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
     return enif_make_tuple2(env, am_error, am_not_open);
 }
 
+/* send(Dev, Bytes) -> ok | {error, not_open} | {error, {unsupported_status, B}}
+ *                   | {error, invalid_arg}            (slice 2, DESIGN §1/§6)
+ *
+ * This wrapper does arg/handle checking, the R1 length validation, and the
+ * liveness gate; the byte→mm_result translation lives entirely behind the seam
+ * (midiio_dev_send_raw, midiio_send.h). It is registered ERL_NIF_DIRTY_JOB_IO_BOUND
+ * (D3): ALSA's send ends in snd_seq_drain_output, which can block under
+ * backpressure, and a blocking syscall can't be yielded — dirty I/O is the
+ * correct scheduler. The per-device process serializes calls into one device, so
+ * there is no lock on this path (DESIGN §2/§4).
+ *
+ * Error vs. crash asymmetry (§6): failures we can name are tagged; malformed
+ * input — which means the encoder above us (midilib) is broken — is let-crash via
+ * badarg, decided here BEFORE the seam so the crash is clean Erlang-side. We do
+ * NOT wrap the adapter in a catch-all that would swallow those bugs. */
+static ERL_NIF_TERM send_nif(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+
+    midiio_dev_res *res = NULL;
+    if (!enif_get_resource(env, argv[0], g_dev_res_type, (void **)&res))
+        return enif_make_badarg(env);          /* foreign handle → let it crash */
+
+    ErlNifBinary bin;
+    if (!enif_inspect_binary(env, argv[1], &bin))
+        return enif_make_badarg(env);          /* not a binary → let it crash */
+
+    /* Malformed framing → let it crash (§6). Decided before the seam. */
+    if (bin.size == 0)
+        return enif_make_badarg(env);          /* empty: no status byte */
+
+    uint8_t b = bin.data[0];
+    if (b < 0x80)
+        return enif_make_badarg(env);          /* leading data byte: not status-complete */
+
+    if (b == 0xF0) {
+        /* SysEx is variable-length; require at least 0xF0 0xF7. The upper bound
+         * (> MM_SYSEX_BUF_SIZE) is minimidio's to report as invalid_arg. */
+        if (bin.size < 2)
+            return enif_make_badarg(env);
+    } else {
+        int exp = midiio_expected_len(b);
+        if (exp != 0 && bin.size != (size_t)exp)
+            return enif_make_badarg(env);      /* known status, wrong length */
+        /* exp == 0 here ⇒ an unframable status (0xF4/F5/F7/F9/FD); we can't know
+         * its length, so we don't validate it — the seam returns the
+         * unsupported-status sentinel, a tagged/diagnosable error (not a crash). */
+    }
+
+    /* Liveness gate (reuses the slice-1 live flag). No lock: the per-device
+     * process serializes open/send/close, and the resource is reachable (it's an
+     * argument) so its destructor cannot race this call. A closed device reports
+     * not_open without touching the torn-down port/context. */
+    if (!res->live)
+        return enif_make_tuple2(env, am_error, am_not_open);
+
+    mm_result r = midiio_dev_send_raw(&res->dev, bin.data, bin.size);
+
+    if (r == (mm_result)MIDIIO_UNSUPPORTED_STATUS)
+        return enif_make_tuple2(env, am_error,
+                   enif_make_tuple2(env, am_unsupported_status,
+                                    enif_make_uint(env, b)));
+
+    switch (r) {
+        case MM_SUCCESS:     return am_ok;
+        case MM_NOT_OPEN:    return enif_make_tuple2(env, am_error, am_not_open);
+        case MM_INVALID_ARG: return enif_make_tuple2(env, am_error, am_invalid_arg);
+        default:             return enif_make_tuple2(env, am_error, result_to_atom(r));
+    }
+}
+
 static ErlNifFunc nif_funcs[] = {
     {"context_open",       0, context_open},
     {"context_close",      1, context_close},
@@ -499,6 +582,8 @@ static ErlNifFunc nif_funcs[] = {
     {"open_output",        1, open_output},
     {"open_output_virtual", 0, open_output_virtual},
     {"close",              1, close_device},
+    /* The only dirty NIF so far: send blocks in the backend drain (D3). */
+    {"send",               2, send_nif, ERL_NIF_DIRTY_JOB_IO_BOUND},
 };
 
 /* Args: module, funcs, load, reload(deprecated→NULL), upgrade, unload.
