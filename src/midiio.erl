@@ -12,11 +12,13 @@
 
 -nifs([context_open/0, context_close/1, result_atom/1, uninit_count/0,
        list_inputs/1, list_outputs/1, caps/1,
-       open_output/1, open_output_virtual/0, close/1, send/2]).
+       open_output/1, open_output_virtual/0, close/1, send/2,
+       open_input/2, start_input/1, stop_input/1, set_owner/2]).
 
 -export([context_open/0, context_close/1, result_atom/1, uninit_count/0,
          list_inputs/1, list_outputs/1, caps/1,
-         open_output/1, open_output_virtual/0, close/1, send/2]).
+         open_output/1, open_output_virtual/0, close/1, send/2,
+         open_input/2, start_input/1, stop_input/1, set_owner/2]).
 
 %% NOTE (F2, disclosed-deferred in arc1/slice5): result_atom/1, uninit_count/0,
 %% and open_output_virtual/0 are test-only introspection/scaffolding NIFs. Gating
@@ -136,4 +138,33 @@ close(_Dev) ->
                                      | {error, {unsupported_status, byte()}}
                                      | {error, invalid_arg}.
 send(_Dev, _Bytes) ->
+    ?NOT_LOADED.
+
+%% @doc Open the MIDI input port at `Index' (from {@link list_inputs/1}), with
+%% `Owner' as the process that will receive inbound messages. Returns an opaque
+%% device handle owning its own MIDI context. After {@link start_input/1}, each
+%% complete inbound message is delivered to the owner as
+%% `{midi_in, Dev :: device(), Bytes :: binary(), TsNanos :: integer()}' —
+%% one message per delivery, byte-exact (no normalization), with a host-monotonic
+%% nanosecond timestamp (`0' when the backend gives none). The handle `Dev' is the
+%% device's identity, echoed in every message. Out-of-range index →
+%% `{error, out_of_range}'.
+-spec open_input(non_neg_integer(), pid()) -> {ok, device()} | {error, atom()}.
+open_input(_Index, _Owner) ->
+    ?NOT_LOADED.
+
+%% @doc Start delivering inbound messages from an input device to its owner.
+-spec start_input(device()) -> ok | {error, atom()}.
+start_input(_Dev) ->
+    ?NOT_LOADED.
+
+%% @doc Stop delivering inbound messages. After this no further `{midi_in, ...}'
+%% arrives; the device stays open until {@link close/1}.
+-spec stop_input(device()) -> ok | {error, atom()}.
+stop_input(_Dev) ->
+    ?NOT_LOADED.
+
+%% @doc Redirect a device's inbound delivery to a new owner process.
+-spec set_owner(device(), pid()) -> ok.
+set_owner(_Dev, _Pid) ->
     ?NOT_LOADED.

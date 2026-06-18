@@ -82,6 +82,15 @@ properly-disclosed expansion, not a silent deviation or a scope drop.
 
 ## Finding F1 (S3) — the send path's safety rests on an unenforced caller contract
 
+> **STRUCTURALLY CLOSED in arc3/slice1 (2026-06-18).** A per-device `ErlNifMutex`
+> was added to `midiio_dev_res`; `send_nif` now does the `live`-check **and** the
+> `mm_out_send*` deref under `res->lock`, and `do_dev_cleanup` tears the device
+> down under the same lock — so the send-vs-close race can no longer UAF. Evidence:
+> the F1 tripwire (two processes sharing one handle, send-loop vs close) is clean
+> over 25 BEAM rounds, and the standalone lock-discipline tripwire is **ASan- and
+> TSan-clean**. See `arc3/slice1/ledger.md` rows 3–6 + the closing report. The
+> contract this finding flagged is now enforced by construction, not just stated.
+
 **Observation.** `send_nif` reads `res->live` **without a lock** and then calls
 into the device/context, while `close/1`'s `do_dev_cleanup` tears the device down
 under `g_uninit_lock`. CC's row-13 rationale — *"the per-device process serializes

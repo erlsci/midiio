@@ -14,10 +14,12 @@
 
 #include <erl_nif.h>
 #include <string.h>
+#include <stdatomic.h>
 
-/* The raw send seam + interim adapter (arc2/slice2). Included after minimidio.h
- * because it uses mm_device / mm_message / mm_out_send. */
+/* The raw send + receive seams + interim adapters (arc2/slice2, arc3/slice1).
+ * Included after minimidio.h because they use mm_device / mm_message. */
 #include "midiio_send.h"
+#include "midiio_recv.h"
 
 /* Compile-time backend atom name, picked by minimidio's platform macro
  * (defined in minimidio.h before the public structs). */
@@ -48,12 +50,26 @@ typedef struct {
 static ErlNifResourceType *g_ctx_res_type = NULL;
 
 /* A device owns its own per-device mm_context (DESIGN §2 / arc-2 model): no
- * shared registry context, no cross-resource keep — the context is embedded, so
- * one guarded cleanup closes the port then uninits the context. */
+ * shared registry context — the context is embedded, so one guarded cleanup
+ * closes the port then uninits the context.
+ *
+ * arc3/slice1 adds, for inputs and the F1 close:
+ *  - is_input: outputs leave owner/keep inert;
+ *  - owner: the recv target, read by the recv thread, written by set_owner/2;
+ *  - kept: whether the recv-thread reference (enif_keep_resource) is still held
+ *    (released exactly once, after mm_in_stop, by stop_input/close/cleanup);
+ *  - lock: a PER-DEVICE mutex guarding owner R/W, send's live-check-and-use, and
+ *    cleanup's teardown — so a concurrent send and close cannot UAF (finding F1).
+ *    Uncontended under the single-owner contract (DESIGN §4 D3 realtime intent).
+ *    Created in every open_*; destroyed LAST in the destructor (never while held). */
 typedef struct {
-    mm_context ctx;
-    mm_device  dev;
-    int        live;
+    mm_context   ctx;
+    mm_device    dev;
+    int          live;
+    int          is_input;
+    int          kept;
+    ErlNifPid    owner;
+    ErlNifMutex *lock;
 } midiio_dev_res;
 
 static ErlNifResourceType *g_dev_res_type = NULL;
@@ -64,7 +80,10 @@ static ErlNifResourceType *g_dev_res_type = NULL;
  * needs explicit synchronization). The count exists for test verification of
  * "exactly one uninit per context" (ledger row 7). */
 static ErlNifMutex *g_uninit_lock  = NULL;
-static int          g_uninit_count = 0;
+/* Atomic: context cleanup flips it under g_uninit_lock, but device cleanup now
+ * runs under the *per-device* lock (F1), so the shared counter needs its own
+ * lock-free synchronization rather than the global mutex. */
+static atomic_int   g_uninit_count = 0;
 
 /* Atoms pre-made in load() so they are valid in any environment
  * (erl-nif best practice). */
@@ -91,6 +110,9 @@ static ERL_NIF_TERM g_backend_atom;
 /* send/2 (slice 2): the tag atom for {error, {unsupported_status, B}}. B is an
  * integer in the tuple, never an atom — we never build atoms from runtime input. */
 static ERL_NIF_TERM am_unsupported_status;
+
+/* recv (arc3/slice1): the leading tag of {midi_in, Dev, Bytes, TsNanos}. */
+static ERL_NIF_TERM am_midi_in;
 
 /* ── Helpers ────────────────────────────────────────────────────────────── */
 
@@ -121,7 +143,7 @@ static int do_uninit(midiio_ctx_res *res)
     if (res->live) {
         mm_context_uninit(&res->ctx);
         res->live = 0;
-        g_uninit_count++;
+        atomic_fetch_add(&g_uninit_count, 1);
         did = 1;
     }
     enif_mutex_unlock(g_uninit_lock);
@@ -143,22 +165,53 @@ static void dtor_context(ErlNifEnv *env, void *obj)
 static int do_dev_cleanup(midiio_dev_res *res)
 {
     int did = 0;
-    enif_mutex_lock(g_uninit_lock);
+    int release_keep = 0;
+
+    if (res->lock == NULL)
+        return 0; /* never fully constructed (mutex create failed at open) */
+
+    enif_mutex_lock(res->lock);
     if (res->live) {
-        mm_out_close(&res->dev);
-        mm_context_uninit(&res->ctx);
+        if (res->is_input) {
+            mm_in_stop(&res->dev);   /* no more callbacks before we close/free */
+            mm_in_close(&res->dev);
+        } else {
+            mm_out_close(&res->dev);
+        }
+        mm_context_uninit(&res->ctx); /* port first, then the per-device context */
         res->live = 0;
-        g_uninit_count++;
+        atomic_fetch_add(&g_uninit_count, 1);
         did = 1;
     }
-    enif_mutex_unlock(g_uninit_lock);
+    /* Release the recv-thread keep exactly once, after the device is torn down
+     * (callbacks have stopped). Whichever of stop_input/close/dtor first reaches
+     * here does it. */
+    if (res->kept) {
+        res->kept = 0;
+        release_keep = 1;
+    }
+    enif_mutex_unlock(res->lock);
+
+    /* enif_release_resource OUTSIDE the lock. Safe from re-entrancy: this only
+     * drops to refcount 0 (triggering the dtor) when called from a context where
+     * the Erlang term is already gone — and then `kept` was already 0, so no
+     * release happens here. */
+    if (release_keep)
+        enif_release_resource(res);
     return did;
 }
 
 static void dtor_device(ErlNifEnv *env, void *obj)
 {
     (void)env;
-    do_dev_cleanup((midiio_dev_res *)obj);
+    midiio_dev_res *res = (midiio_dev_res *)obj;
+    do_dev_cleanup(res);
+    /* The mutex is a field of the resource the VM is about to free, so destroy it
+     * LAST — after the final cleanup, never while held (nif-resources). */
+    if (res->lock != NULL) {
+        enif_mutex_destroy(res->lock);
+        res->lock = NULL;
+    }
 }
 
 /* ── load / upgrade ─────────────────────────────────────────────────────────
@@ -221,6 +274,7 @@ static int init_statics(ErlNifEnv *env, ErlNifResourceFlags flags)
     g_backend_atom  = enif_make_atom(env, MIDIIO_BACKEND);
 
     am_unsupported_status = enif_make_atom(env, "unsupported_status");
+    am_midi_in            = enif_make_atom(env, "midi_in");
 
     return 0;
 }
@@ -315,10 +369,7 @@ static ERL_NIF_TERM uninit_count(ErlNifEnv *env, int argc,
     (void)argc;
     (void)argv;
 
-    enif_mutex_lock(g_uninit_lock);
-    int c = g_uninit_count;
-    enif_mutex_unlock(g_uninit_lock);
-    return enif_make_int(env, c);
+    return enif_make_int(env, atomic_load(&g_uninit_count));
 }
 
 /* ── Enumeration + capabilities (slice 3, read-only) ────────────────────────── */
@@ -400,13 +451,31 @@ static ERL_NIF_TERM caps(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     return m;
 }
 
-/* ── Output device lifecycle (arc 2 slice 1) ────────────────────────────────
- * mm_context_init + mm_out_open are fast OS calls (MIDIClientCreate /
- * MIDIOutputPortCreate; snd_seq_open / port-create on ALSA), well under 1 ms —
- * regular NIFs, not dirty. The dirty send arrives in slice 2. */
+/* ── Device lifecycle (arc 2 slice 1 output; arc 3 slice 1 input) ────────────
+ * mm_context_init / mm_out_open / mm_in_open are fast OS calls, well under 1 ms —
+ * regular NIFs, not dirty (only send/2 is dirty). */
 
-/* Finalize a successfully-opened device resource into {ok, Dev}: flip live,
- * hand the term to Erlang, release our own reference. */
+/* Allocate a device resource with its per-device lock created (F1). Zeroes the
+ * struct (live=0, kept=0, owner inert), sets is_input. Returns NULL on alloc
+ * failure (caller returns {error, alloc_failed}). live flips to 1 only on a
+ * fully successful open (device_ok). */
+static midiio_dev_res *new_device(int is_input)
+{
+    midiio_dev_res *res =
+        enif_alloc_resource(g_dev_res_type, sizeof(midiio_dev_res));
+    if (res == NULL)
+        return NULL;
+    memset(res, 0, sizeof *res);
+    res->is_input = is_input;
+    res->lock = enif_mutex_create("midiio_dev_lock");
+    if (res->lock == NULL) {
+        enif_release_resource(res); /* dtor: do_dev_cleanup no-ops (lock NULL) */
+        return NULL;
+    }
+    return res;
+}
+
+/* Finalize a successfully-opened device resource into {ok, Dev}. */
 static ERL_NIF_TERM device_ok(ErlNifEnv *env, midiio_dev_res *res)
 {
     res->live = 1;
@@ -415,10 +484,51 @@ static ERL_NIF_TERM device_ok(ErlNifEnv *env, midiio_dev_res *res)
     return enif_make_tuple2(env, am_ok, term);
 }
 
-/* open_output(Index) -> {ok, Dev} | {error, Atom}
- * Each device gets its own legibly-named per-device context. Partial-failure
- * cleanup: if the port open fails after the context initialised, uninit the
- * context before releasing so we never leak a context. */
+/* The recv callback (arc3/slice1 crux). Runs on minimidio's backend thread (NOT
+ * an ERTS scheduler), userdata = the kept midiio_dev_res*. Builds one
+ * {midi_in, Dev, <<Bytes>>, TsNanos} in a process-independent env and delivers it
+ * to the owner via enif_send. Touches no scheduler state — only the per-device
+ * lock (for owner), a fresh env, and enif_send (nif-thread-safety / L03/L04). */
+static void recv_cb(mm_device *dev, const mm_message *msg, void *userdata)
+{
+    (void)dev;
+    midiio_dev_res *res = (midiio_dev_res *)userdata;
+
+    ErlNifEnv *menv = enif_alloc_env();
+
+    /* Bytes via the inbound seam. SysEx (msg->sysex) is callback-lifetime only,
+     * so memcpy it into the binary HERE, never alias it (L04). */
+    ERL_NIF_TERM bytes;
+    if (msg->type == MM_SYSEX) {
+        unsigned char *p = enif_make_new_binary(menv, msg->sysex_size, &bytes);
+        if (msg->sysex_size > 0)
+            memcpy(p, msg->sysex, msg->sysex_size);
+    } else {
+        uint8_t  buf[3];
+        size_t   n = midiio_msg_to_bytes(msg, buf);
+        unsigned char *p = enif_make_new_binary(menv, n, &bytes);
+        memcpy(p, buf, n);
+    }
+
+    /* Timestamp: minimidio reports seconds (mach / CLOCK_MONOTONIC since boot —
+     * the struct's "since open" comment is wrong, R5). Emit host-monotonic int64
+     * nanoseconds; 0/absent → 0 ("now"). */
+    ErlNifSInt64 ts_ns = (ErlNifSInt64)(msg->timestamp * 1.0e9);
+
+    ERL_NIF_TERM term = enif_make_tuple4(
+        menv, am_midi_in, enif_make_resource(menv, res), bytes,
+        enif_make_int64(menv, ts_ns));
+
+    enif_mutex_lock(res->lock);          /* owner is written by set_owner/2 */
+    ErlNifPid owner = res->owner;
+    enif_mutex_unlock(res->lock);
+
+    enif_send(NULL, &owner, menv, term); /* NULL caller_env: not an ERTS thread */
+    enif_free_env(menv);                 /* env invalidated by the send */
+}
+
+/* open_output(Index) -> {ok, Dev} | {error, Atom}. Per-device legibly-named
+ * context. Partial-failure: uninit the context if the port open fails. */
 static ERL_NIF_TERM open_output(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
     (void)argc;
@@ -427,11 +537,9 @@ static ERL_NIF_TERM open_output(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
     if (!enif_get_uint(env, argv[0], &idx))
         return enif_make_badarg(env);
 
-    midiio_dev_res *res =
-        enif_alloc_resource(g_dev_res_type, sizeof(midiio_dev_res));
+    midiio_dev_res *res = new_device(0);
     if (res == NULL)
         return enif_make_tuple2(env, am_error, am_alloc_failed);
-    res->live = 0;
 
     char name[64];
     snprintf(name, sizeof name, "midiio-out:%u", idx);
@@ -452,21 +560,17 @@ static ERL_NIF_TERM open_output(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
     return device_ok(env, res);
 }
 
-/* open_output_virtual() -> {ok, Dev} | {error, Atom}
- * Test/scaffolding NIF: opens a *virtual* output source (no destination needed)
- * so the device resource/destructor lifecycle is exercisable headlessly. Not a
- * public virtual-port API (arc-3 loopback reuses this pattern). */
+/* open_output_virtual() -> {ok, Dev} | {error, Atom}. Test scaffolding: a virtual
+ * output source (no destination needed) — also the inbound loopback's stimulus. */
 static ERL_NIF_TERM open_output_virtual(ErlNifEnv *env, int argc,
                                         const ERL_NIF_TERM argv[])
 {
     (void)argc;
     (void)argv;
 
-    midiio_dev_res *res =
-        enif_alloc_resource(g_dev_res_type, sizeof(midiio_dev_res));
+    midiio_dev_res *res = new_device(0);
     if (res == NULL)
         return enif_make_tuple2(env, am_error, am_alloc_failed);
-    res->live = 0;
 
     mm_result r = mm_context_init(&res->ctx, "midiio-out:virtual");
     if (r != MM_SUCCESS) {
@@ -482,6 +586,110 @@ static ERL_NIF_TERM open_output_virtual(ErlNifEnv *env, int argc,
     }
 
     return device_ok(env, res);
+}
+
+/* open_input(Index, Owner) -> {ok, Dev} | {error, Atom}. Per-device context;
+ * registers recv_cb (userdata = res) and enif_keep_resource so the backend thread
+ * holds res across the callback (released after mm_in_stop). Partial-failure as
+ * for open_output. */
+static ERL_NIF_TERM open_input(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+
+    unsigned int idx;
+    if (!enif_get_uint(env, argv[0], &idx))
+        return enif_make_badarg(env);
+    ErlNifPid owner;
+    if (!enif_get_local_pid(env, argv[1], &owner))
+        return enif_make_badarg(env);
+
+    midiio_dev_res *res = new_device(1);
+    if (res == NULL)
+        return enif_make_tuple2(env, am_error, am_alloc_failed);
+    res->owner = owner;
+
+    char name[64];
+    snprintf(name, sizeof name, "midiio-in:%u", idx);
+
+    mm_result r = mm_context_init(&res->ctx, name);
+    if (r != MM_SUCCESS) {
+        enif_release_resource(res);
+        return enif_make_tuple2(env, am_error, result_to_atom(r));
+    }
+
+    r = mm_in_open(&res->ctx, &res->dev, idx, recv_cb, res);
+    if (r != MM_SUCCESS) {
+        mm_context_uninit(&res->ctx);
+        enif_release_resource(res);
+        return enif_make_tuple2(env, am_error, result_to_atom(r));
+    }
+
+    /* The backend thread now holds res as userdata: keep it across the callback's
+     * lifetime. Released exactly once after mm_in_stop (stop_input/close/dtor). */
+    enif_keep_resource(res);
+    res->kept = 1;
+
+    return device_ok(env, res);
+}
+
+/* start_input(Dev) -> ok | {error, atom()}. Connects the source so callbacks
+ * flow (mm_in_start). */
+static ERL_NIF_TERM start_input(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+    midiio_dev_res *res = NULL;
+    if (!enif_get_resource(env, argv[0], g_dev_res_type, (void **)&res))
+        return enif_make_badarg(env);
+
+    enif_mutex_lock(res->lock);
+    mm_result r = (res->live && res->is_input) ? mm_in_start(&res->dev) : MM_NOT_OPEN;
+    enif_mutex_unlock(res->lock);
+
+    return (r == MM_SUCCESS) ? am_ok
+                             : enif_make_tuple2(env, am_error, result_to_atom(r));
+}
+
+/* stop_input(Dev) -> ok | {error, atom()}. mm_in_stop (no more callbacks), THEN
+ * release the recv-thread keep — guarded so a double stop is a clean no-op and
+ * the keep is released exactly once. */
+static ERL_NIF_TERM stop_input(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+    midiio_dev_res *res = NULL;
+    if (!enif_get_resource(env, argv[0], g_dev_res_type, (void **)&res))
+        return enif_make_badarg(env);
+
+    int release_keep = 0;
+    enif_mutex_lock(res->lock);
+    if (res->live && res->is_input)
+        mm_in_stop(&res->dev);
+    if (res->kept) {
+        res->kept = 0;
+        release_keep = 1;
+    }
+    enif_mutex_unlock(res->lock);
+
+    if (release_keep)
+        enif_release_resource(res); /* after stop: no callback can fire now */
+    return am_ok;
+}
+
+/* set_owner(Dev, Pid) -> ok. Writes owner under the per-device lock (the recv
+ * thread reads it under the same lock). */
+static ERL_NIF_TERM set_owner(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+    midiio_dev_res *res = NULL;
+    if (!enif_get_resource(env, argv[0], g_dev_res_type, (void **)&res))
+        return enif_make_badarg(env);
+    ErlNifPid pid;
+    if (!enif_get_local_pid(env, argv[1], &pid))
+        return enif_make_badarg(env);
+
+    enif_mutex_lock(res->lock);
+    res->owner = pid;
+    enif_mutex_unlock(res->lock);
+    return am_ok;
 }
 
 /* close(Dev) -> ok | {error, not_open}
@@ -549,14 +757,19 @@ static ERL_NIF_TERM send_nif(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]
          * unsupported-status sentinel, a tagged/diagnosable error (not a crash). */
     }
 
-    /* Liveness gate (reuses the slice-1 live flag). No lock: the per-device
-     * process serializes open/send/close, and the resource is reachable (it's an
-     * argument) so its destructor cannot race this call. A closed device reports
-     * not_open without touching the torn-down port/context. */
-    if (!res->live)
+    /* F1 close: the live-check AND the handle use run under the per-device lock,
+     * so a concurrent close/1 (a second process sharing this device()) cannot
+     * tear the port/context down between the check and the mm_out_send* deref —
+     * the use-after-free the unlocked slice-2 version had. The lock is per-device
+     * and uncontended under the single-owner contract (DESIGN §4 D3); it only ever
+     * serializes the pathological cross-process send-vs-close race. */
+    enif_mutex_lock(res->lock);
+    if (!res->live) {
+        enif_mutex_unlock(res->lock);
         return enif_make_tuple2(env, am_error, am_not_open);
-
+    }
     mm_result r = midiio_dev_send_raw(&res->dev, bin.data, bin.size);
+    enif_mutex_unlock(res->lock);
 
     if (r == (mm_result)MIDIIO_UNSUPPORTED_STATUS)
         return enif_make_tuple2(env, am_error,
@@ -581,6 +794,10 @@ static ErlNifFunc nif_funcs[] = {
     {"caps",               1, caps},
     {"open_output",        1, open_output},
     {"open_output_virtual", 0, open_output_virtual},
+    {"open_input",         2, open_input},
+    {"start_input",        1, start_input},
+    {"stop_input",         1, stop_input},
+    {"set_owner",          2, set_owner},
     {"close",              1, close_device},
     /* The only dirty NIF so far: send blocks in the backend drain (D3). */
     {"send",               2, send_nif, ERL_NIF_DIRTY_JOB_IO_BOUND},

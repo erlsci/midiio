@@ -376,6 +376,44 @@ Good - either keep the introspection NIFs unconditionally (they're harmless), or
        while a single shared .so is built in-tree.
 ```
 
+## L19 — A mutex that is a resource *field* must be destroyed LAST in the destructor
+**Strength: MUST. Stage: build (arc3/slice1). `[substrate: nif-resources]` (refines).**
+
+A per-device `ErlNifMutex*` stored *inside* the resource (to guard send-vs-close,
+the F1 fix) is freed by the VM when the resource is freed — so the destructor must
+run its mutex-guarded cleanup *first*, then `enif_mutex_destroy` as its very last
+act, never while held. The destructor runs at refcount 0, so no live op can race
+it; the danger is ordering within the destructor itself. Create the lock in every
+`open_*` (so even a partial-failure release finds a valid lock) and guard
+`do_*_cleanup` against a NULL lock (the alloc-but-mutex-create-failed path).
+
+```c
+/* Bad - destroy the lock, THEN run cleanup that locks it (use-after-free), or
+   leave it to the VM (leak) */
+static void dtor(ErlNifEnv* e, void* obj) {
+    dev_res* r = obj; enif_mutex_destroy(r->lock); do_cleanup(r); /* UAF */ }
+
+/* Good - guarded cleanup under the lock, then destroy the lock last */
+static void dtor(ErlNifEnv* e, void* obj) {
+    dev_res* r = obj;
+    do_cleanup(r);                         /* takes/releases r->lock internally */
+    if (r->lock) { enif_mutex_destroy(r->lock); r->lock = NULL; }
+}
+```
+
+## L20 — The keep that protects a recv callback blocks GC-of-handle cleanup
+**Strength: CONSIDER. Stage: build (arc3/slice1). `[GAP]` (lifetime gotcha).**
+
+`enif_keep_resource` at `open_input` (so the backend recv thread can hold `res` as
+userdata, L01) raises the refcount above the Erlang term — so a *dropped* input
+handle that was never stopped/closed will not GC-collect (the keep pins it). The
+§7 "GC-of-handle" baseline therefore applies cleanly to outputs and to inputs
+*after* `stop`/`close`, but a started-and-abandoned input leaks until an explicit
+`stop_input`/`close`. Release the keep exactly once (a `kept` flag, guarded by the
+per-device lock) *after* `mm_in_stop` (no callback can fire then), in whichever of
+stop/close/dtor reaches it first. Prompt monitor-based cleanup
+(`enif_monitor_process`) is the real fix; until then this is a documented residual.
+
 ---
 
 ## Open threads to resolve into learnings as the build proceeds

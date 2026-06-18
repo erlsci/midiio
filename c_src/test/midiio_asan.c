@@ -21,13 +21,48 @@
 #define MINIMIDIO_IMPLEMENTATION
 #include "../minimidio.h"
 
-/* The raw send seam (arc2/slice2). The harness drives the same seam the NIF does
- * — this is exactly what makes a single mm_device*-typed seam worthwhile. */
+/* The raw send + receive seams (arc2/slice2, arc3/slice1). The harness drives the
+ * same seams the NIF does — what makes the single mm_device*-typed seams worth it. */
 #include "../midiio_send.h"
+#include "../midiio_recv.h"
 
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <pthread.h>
+#include <stdatomic.h>
+
+/* A no-op recv callback for the virtual-input lifecycle loop (nothing sends to
+ * it, so it never fires — this exercises the pure resource path). */
+static void tw_noop_cb(mm_device *dev, const mm_message *msg, void *ud)
+{
+    (void)dev; (void)msg; (void)ud;
+}
+
+/* F1 tripwire (arc3/slice1, ledger row 5): mirror the NIF's per-device-lock
+ * discipline with a pthread_mutex (the standalone harness has no erl_nif, so no
+ * enif_mutex). A sender thread loops the live-check + send under the lock while
+ * the main thread closes under the same lock — the exact send_nif vs
+ * do_dev_cleanup race. ASan/TSan-clean ⇒ the locking discipline has no UAF/race;
+ * removing the lock here makes both sanitizers flag immediately. */
+static struct {
+    pthread_mutex_t lock;
+    mm_device       dev;
+    int             live;
+} g_tw;
+
+static void *tw_sender(void *arg)
+{
+    atomic_int *stop = (atomic_int *)arg;
+    static const uint8_t noteon[3] = {0x90, 60, 100};
+    while (!atomic_load(stop)) {
+        pthread_mutex_lock(&g_tw.lock);
+        if (g_tw.live)
+            (void)midiio_dev_send_raw(&g_tw.dev, noteon, 3);
+        pthread_mutex_unlock(&g_tw.lock);
+    }
+    return NULL;
+}
 
 int main(void)
 {
@@ -160,6 +195,83 @@ int main(void)
         assert(mm_out_close(&dev) == MM_SUCCESS);
         assert(mm_context_uninit(&ctx) == MM_SUCCESS);
     }
+
+    /* Inbound seam (arc3 row 13): the inverse of the outbound adapter — a parsed
+     * mm_message reconstructs to its exact wire bytes. Spot-check representative
+     * types; SysEx is the caller's memcpy, so it returns 0 here. */
+    {
+        uint8_t buf[3];
+        mm_message m;
+
+        memset(&m, 0, sizeof m);
+        m.type = MM_NOTE_ON; m.channel = 0; m.data[0] = 60; m.data[1] = 100;
+        assert(midiio_msg_to_bytes(&m, buf) == 3 &&
+               buf[0] == 0x90 && buf[1] == 60 && buf[2] == 100);
+
+        memset(&m, 0, sizeof m);
+        m.type = MM_PROGRAM_CHANGE; m.channel = 3; m.data[0] = 5;
+        assert(midiio_msg_to_bytes(&m, buf) == 2 &&
+               buf[0] == 0xC3 && buf[1] == 5);
+
+        memset(&m, 0, sizeof m);
+        m.type = MM_SONG_POSITION; m.song_position = (uint16_t)(0x10 | (0x20 << 7));
+        assert(midiio_msg_to_bytes(&m, buf) == 3 &&
+               buf[0] == 0xF2 && buf[1] == 0x10 && buf[2] == 0x20);
+
+        memset(&m, 0, sizeof m);
+        m.type = MM_CLOCK;
+        assert(midiio_msg_to_bytes(&m, buf) == 1 && buf[0] == 0xF8);
+
+        memset(&m, 0, sizeof m);
+        m.type = MM_SYSEX;          /* caller uses msg->sysex */
+        assert(midiio_msg_to_bytes(&m, buf) == 0);
+    }
+
+    /* Input device lifecycle (arc3 row 17): open a virtual input destination,
+     * start/stop/close it, uninit the context — looped, port-before-context, the
+     * keep/release mirrored by the NIF. No callback fires here (nothing sends to
+     * it), so this is the pure resource path. */
+    for (int i = 0; i < 200; i++) {
+        mm_context ctx;
+        mm_device  dev;
+        assert(mm_context_init(&ctx, "midiio-in:asan") == MM_SUCCESS);
+        assert(mm_in_open_virtual(&ctx, &dev, tw_noop_cb, NULL) == MM_SUCCESS);
+        assert(mm_in_start(&dev) == MM_SUCCESS);
+        assert(mm_in_stop(&dev) == MM_SUCCESS);
+        assert(mm_in_close(&dev) == MM_SUCCESS);
+        assert(mm_context_uninit(&ctx) == MM_SUCCESS);
+    }
+
+    /* F1 tripwire (arc3 row 5): the lock-guarded send-vs-close race, repeated. */
+    pthread_mutex_init(&g_tw.lock, NULL);
+    for (int i = 0; i < 50; i++) {
+        mm_context ctx;
+        assert(mm_context_init(&ctx, "midiio-out:asan-tw") == MM_SUCCESS);
+
+        pthread_mutex_lock(&g_tw.lock);
+        assert(mm_out_open_virtual(&ctx, &g_tw.dev) == MM_SUCCESS);
+        g_tw.live = 1;
+        pthread_mutex_unlock(&g_tw.lock);
+
+        atomic_int stop = 0;
+        pthread_t  sender;
+        pthread_create(&sender, NULL, tw_sender, &stop);
+
+        for (int k = 0; k < 200; k++) {        /* let the sender hammer it */
+            pthread_mutex_lock(&g_tw.lock);
+            pthread_mutex_unlock(&g_tw.lock);
+        }
+
+        pthread_mutex_lock(&g_tw.lock);         /* close mid-flight, under the lock */
+        mm_out_close(&g_tw.dev);
+        g_tw.live = 0;
+        pthread_mutex_unlock(&g_tw.lock);
+
+        atomic_store(&stop, 1);
+        pthread_join(sender, NULL);
+        assert(mm_context_uninit(&ctx) == MM_SUCCESS);
+    }
+    pthread_mutex_destroy(&g_tw.lock);
 
     printf("ASAN-OK\n");
     return 0;

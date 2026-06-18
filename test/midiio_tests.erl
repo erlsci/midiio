@@ -310,7 +310,104 @@ runtime_available() ->
         _ -> true
     end.
 
+%% ── arc3/slice1: input lifecycle + recv + F1 close ──────────────────────────
+%% The loopback uses a virtual output SOURCE + a real open_input connected to it
+%% (headless-safe on CoreMIDI / snd-virmidi). Where the virtual source isn't
+%% enumerable (some headless backends), the delivery tests skip.
+
+%% Row 7: out-of-range index → {error, out_of_range} (headless-safe).
+open_input_out_of_range_test() ->
+    ?assertEqual({error, out_of_range}, midiio:open_input(100000, self())).
+
+%% Row 11: one complete message arrives intact to the owner, with the device
+%% handle as identity and an integer timestamp.
+one_message_loopback_test() ->
+    with_loopback(self(), fun(In, Out) ->
+        ok = midiio:send(Out, <<16#90, 60, 100>>),
+        receive
+            {midi_in, Dev, Bytes, Ts} ->
+                ?assertEqual(In, Dev),
+                ?assertEqual(<<16#90, 60, 100>>, Bytes),
+                ?assert(is_integer(Ts))
+        after 3000 -> ?assert(false)
+        end
+    end).
+
+%% Row 10: set_owner/2 redirects delivery to a new process.
+set_owner_redirect_test() ->
+    with_loopback(self(), fun(In, Out) ->
+        Parent = self(),
+        B = spawn(fun() ->
+            receive {midi_in, _, Bytes, _} -> Parent ! {b_got, Bytes} end
+        end),
+        ok = midiio:set_owner(In, B),
+        ok = midiio:send(Out, <<16#90, 61, 100>>),
+        receive
+            {b_got, Bytes} -> ?assertEqual(<<16#90, 61, 100>>, Bytes)
+        after 3000 -> ?assert(false)
+        end,
+        %% the original owner (self) must NOT have received it
+        receive {midi_in, _, _, _} -> ?assert(false) after 100 -> ok end
+    end).
+
+%% Row 9: close an input; double close → {error, not_open}.
+input_close_double_close_test() ->
+    with_loopback(self(), fun(In, _Out) ->
+        ok = midiio:stop_input(In),
+        ?assertEqual(ok, midiio:close(In)),
+        ?assertEqual({error, not_open}, midiio:close(In))
+    end).
+
+%% Row 5: F1 tripwire — two processes share one output handle; one loops send,
+%% the other closes mid-flight. Without the per-device lock send_nif's unlocked
+%% live-check + handle deref would race close's teardown (use-after-free).
+%% Completing N rounds with the VM alive is the behavioural close; the ASan/TSan
+%% harness (make asan / make tsan) is the sanitizer evidence.
+f1_send_vs_close_tripwire_test_() ->
+    {timeout, 60, fun() ->
+        lists:foreach(fun(_) ->
+            {ok, Out} = midiio:open_output_virtual(),
+            Parent = self(),
+            S = spawn(fun() -> send_loop(Out, 4000), Parent ! done end),
+            timer:sleep(2),
+            ok = midiio:close(Out),     %% race the sender's loop
+            receive done -> ok after 20000 -> exit({tripwire, S, stuck}) end
+        end, lists:seq(1, 25)),
+        ?assert(true)   %% reached here ⇒ no UAF crashed the VM
+    end}.
+
 %% ── helpers ────────────────────────────────────────────────────────────────
+
+%% Set up a virtual output source + a real input connected to it (one VM), run
+%% Body(In, Out), then tear down. Skips (no assertion) if the virtual source is
+%% not enumerable on this backend.
+with_loopback(Owner, Body) ->
+    {ok, Out} = midiio:open_output_virtual(),
+    {ok, Ctx} = midiio:context_open(),
+    Ins = midiio:list_inputs(Ctx),
+    ok = midiio:context_close(Ctx),
+    Match = [I || {I, N} <- Ins,
+                  binary:match(N, <<"midiio-out:virtual">>) =/= nomatch],
+    case Match of
+        [Idx | _] ->
+            {ok, In} = midiio:open_input(Idx, Owner),
+            ok = midiio:start_input(In),
+            timer:sleep(50),
+            try Body(In, Out)
+            after
+                catch midiio:stop_input(In),
+                catch midiio:close(In),
+                catch midiio:close(Out)
+            end;
+        [] ->
+            catch midiio:close(Out),
+            ok %% virtual source not enumerable here; delivery test skipped
+    end.
+
+send_loop(_Dev, 0) -> ok;
+send_loop(Dev, N) ->
+    catch midiio:send(Dev, <<16#90, 60, 100>>),
+    send_loop(Dev, N - 1).
 
 %% A port list is a list of {non_neg_integer(), binary()} (possibly empty).
 assert_port_list(L) ->

@@ -1,5 +1,11 @@
 # Ledger — arc2/slice2 remediation F1: document the single-owner contract
 
+> **STRUCTURAL CLOSE LANDED (arc3/slice1, 2026-06-18).** The documented contract
+> this remediation stated is now enforced by a per-device `ErlNifMutex`:
+> `send_nif`'s live-check-and-use and `do_dev_cleanup`'s teardown run under
+> `res->lock`. The send-vs-close UAF is gone — F1 tripwire ASan/TSan-clean +
+> 25 BEAM rounds clean. See `arc3/slice1/`.
+
 > CC implements + fills **CC evidence**; CDC verifies independently. Disposition:
 > **document-only** (no locking, no behaviour change). Severity reassessed S3→S2
 > (from-safe-Erlang UAF in a published library); document-now / structural-close-in
