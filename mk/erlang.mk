@@ -101,7 +101,7 @@ shell:
 .PHONY: asan
 asan:
 	@printf '$(BLUE)Building + running the C ASan harness...$(RESET)\n'
-	@cc -fsanitize=address -g -std=c11 -Wall -Wextra -Wno-unused-function \
+	@cc -fsanitize=address -g -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wno-unused-function \
 	    c_src/test/midiio_asan.c -o /tmp/midiio_asan \
 	    $$(uname -s | grep -qi darwin \
 	        && echo '-framework CoreMIDI -framework CoreFoundation' \
