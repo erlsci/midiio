@@ -27,7 +27,7 @@ design — raise an amendment request instead of working around the ledger.
 
 No existing behavior changes. In particular **do not touch** the per-type
 `switch (ev->type)` in `mm__alsa_recv_thread`, the `mm_out_send` / `mm_out_send_sysex`
-bodies, or the existing vel-0 fold (line 1406) — that fold is a *separate* PR
+bodies, or the existing vel-0 fold (line 1570) — that fold is a *separate* PR
 (its ticket), not this work. Your raw path bypasses the fold by construction
 because it uses `snd_midi_event_decode`, which is new code, not an edit. Ledger
 A-12/A-13 verify this.
@@ -35,28 +35,28 @@ A-12/A-13 verify this.
 ## What to build (summary — full detail in slice-doc.md)
 
 **Device state (D1):** add `snd_midi_event_t* midi_ev;` to `mm__dev_alsa`
-(struct ~line 474). Allocate it in the raw input opens
+(struct ~line 487). Allocate it in the raw input opens
 (`snd_midi_event_new(MM_SYSEX_BUF_SIZE, …)` + `snd_midi_event_no_status(…, 1)` on
 the decoder); lazily in `mm_out_send_raw`; free in `mm_in_close` / `mm_out_close`.
 
-**Raw inbound (D2):** in `mm__alsa_recv_thread`'s drain loop (~line 1365), add
+**Raw inbound (D2):** in `mm__alsa_recv_thread`'s drain loop (~line 1529), add
 `if (dev->is_raw) { … continue; }` **before** the `switch`, parallel to the
 existing `if (dev->is_ump)` branch. SysEx events → accumulate into
-`da->sysex_buf`/`sysex_pos` (mirror the struct accumulator at 1492–1510), deliver
+`da->sysex_buf`/`sysex_pos` (mirror the struct accumulator at ~1656–1674), deliver
 whole on `0xF7`. All other events → `snd_midi_event_decode` into a small buffer →
 `raw_callback`. Never touch `dev->callback` (NULL in raw mode).
 
 **Raw outbound (D3):** `mm_out_send_raw` — guard like the other sends; ensure
 `da->midi_ev` exists; `snd_midi_event_reset_encode`; loop
 `snd_midi_event_encode` over the buffer, sending each produced event via the
-existing `mm__alsa_send_ev` helper (line 1651). Byte-exact, no cap (encode
+existing `mm__alsa_send_ev` helper (line 1825). Byte-exact, no cap (encode
 assembles `F0…F7` into one variable SysEx event).
 
-**Opens (D4):** `mm_in_open_raw` ≈ `mm_in_open` (1520); `mm_in_open_virtual_raw`
-≈ `mm_in_open_virtual` (1764). Set `dev->raw_callback = cb; dev->is_raw = 1;`
+**Opens (D4):** `mm_in_open_raw` ≈ `mm_in_open` (1684); `mm_in_open_virtual_raw`
+≈ `mm_in_open_virtual` (1938). Set `dev->raw_callback = cb; dev->is_raw = 1;`
 (leave `callback` NULL) and allocate `da->midi_ev`.
 
-**Caps (D5):** add `MM_CAP_RAW` to the ALSA `mm_context_caps` bitmask (line 1253).
+**Caps (D5):** add `MM_CAP_RAW` to the ALSA `mm_context_caps` bitmask (line 1415).
 
 **Harness (D6):** extend `tests/raw_loopback.c` to compile and pass on Linux.
 Same API-level loopback as slice 01's corrected primary path: `mm_out_open_virtual`

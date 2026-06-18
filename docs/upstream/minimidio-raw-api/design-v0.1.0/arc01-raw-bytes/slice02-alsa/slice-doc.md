@@ -4,7 +4,7 @@
 (shared scaffolding — typedef, `MM_CAP_RAW`, device fields, decls — already exists).*
 
 *Design of record:* `../../../minimidio-raw-api-and-findings.md` (§4 API, §5 semantics, §6 ALSA reality).
-*Line numbers against minimidio `bb705e8`; re-confirm before editing.*
+*Line numbers against `feat/raw-bytes-api` @ `f71c3c0` (post-slice-01); re-confirm before editing.*
 
 ## Goal
 
@@ -16,7 +16,7 @@ existing struct decode/encode paths are untouched.
 
 ALSA's sequencer delivers **parsed `snd_seq_event_t` events**, not wire bytes, and
 minimidio hand-decodes each event type into `mm_message` in `mm__alsa_recv_thread`
-(line 1336) — that per-type switch is where the U2 vel-0 fold lives (line 1406).
+(line 1500) — that per-type switch is where the U2 vel-0 fold lives (line 1570).
 
 So on ALSA "raw" means: minimidio still owns the event↔byte conversion, but uses
 ALSA's canonical bridge instead of the hand-decode, and hands you **bytes**:
@@ -50,7 +50,7 @@ than on CoreMIDI, since ALSA is *the* backend that folds in struct mode.)
 
 ### D1 — A `snd_midi_event_t` on the ALSA device
 
-Add to `mm__dev_alsa` (struct at line ~474): `snd_midi_event_t* midi_ev;`. It is
+Add to `mm__dev_alsa` (struct at line ~487): `snd_midi_event_t* midi_ev;`. It is
 the byte↔event coder. Lifecycle:
 
 - **Input (raw):** allocate in `mm_in_open_raw` / `mm_in_open_virtual_raw` via
@@ -68,15 +68,15 @@ they link with the `-lasound` already used. No new dependency.)
 
 ### D2 — Raw inbound branch in `mm__alsa_recv_thread`
 
-Inside the event-drain loop (line ~1365), add an `if (dev->is_raw) { … continue; }`
+Inside the event-drain loop (line ~1529), add an `if (dev->is_raw) { … continue; }`
 branch, placed **before** the existing `switch (ev->type)` and parallel to the
-existing `if (dev->is_ump)` branch (line ~1369). It must never touch `dev->callback`
+existing `if (dev->is_ump)` branch (line ~1531). It must never touch `dev->callback`
 (NULL in raw mode). Logic:
 
 ```
 if (dev->is_raw):
     if ev->type == SND_SEQ_EVENT_SYSEX:
-        # reuse the existing accumulator pattern (mirrors struct path 1492–1510)
+        # reuse the existing accumulator pattern (mirrors struct path ~1656–1674)
         append ev->data.ext bytes to da->sysex_buf / da->sysex_pos (bounds-checked)
         if last byte == 0xF7:
             raw_callback(dev, da->sysex_buf, da->sysex_pos, ts, ud)
@@ -98,7 +98,7 @@ problem does not arise on this backend.
 ### D3 — `mm_out_send_raw` (ALSA)
 
 Byte-exact, no cap. Encode the buffer into one-or-more events and send each via
-the existing `mm__alsa_send_ev` helper (line 1651):
+the existing `mm__alsa_send_ev` helper (line 1825):
 
 ```
 guards: if (!dev||!dev->is_open||dev->is_input) return MM_NOT_OPEN;
@@ -122,16 +122,16 @@ event, no cap (the ALSA backend never had the CoreMIDI U1 stack-packet problem).
 
 ### D4 — Open functions
 
-- `mm_in_open_raw` ≈ `mm_in_open` (line 1520): same enumeration/port-create/pipe
+- `mm_in_open_raw` ≈ `mm_in_open` (line 1684): same enumeration/port-create/pipe
   setup, but `dev->raw_callback = cb; dev->is_raw = 1;` (leave `callback` NULL) and
   allocate `da->midi_ev` (D1). `mm_in_start` (unchanged) connects + spawns the thread.
-- `mm_in_open_virtual_raw` ≈ `mm_in_open_virtual` (line 1764): same
+- `mm_in_open_virtual_raw` ≈ `mm_in_open_virtual` (line 1938): same
   `snd_seq_create_simple_port(WRITE|SUBS_WRITE)` + wake-pipe, with raw fields +
   `da->midi_ev`.
 
 ### D5 — Caps
 
-ALSA `mm_context_caps` (line 1253): add `MM_CAP_RAW` to the `caps` bitmask.
+ALSA `mm_context_caps` (line 1415): add `MM_CAP_RAW` to the `caps` bitmask.
 
 ### D6 — Harness extension
 
