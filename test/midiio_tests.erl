@@ -116,6 +116,64 @@ enumeration_bad_handle_test() ->
     ?assertError(badarg, midiio:list_outputs(R)),
     ?assertError(badarg, midiio:caps(R)).
 
+%% ── arc2/slice1: output device resource + lifecycle ─────────────────────────
+%% Deterministic rows use a virtual output (headless-safe); row 12 opens real
+%% hardware only when a destination is present.
+
+%% Row 4: out-of-range index → {error, out_of_range} (headless-safe).
+open_output_out_of_range_test() ->
+    ?assertEqual({error, out_of_range}, midiio:open_output(100000)).
+
+%% Row 3: open returns an opaque device handle; a foreign ref is rejected.
+open_output_virtual_opaque_test() ->
+    {ok, D} = midiio:open_output_virtual(),
+    ?assert(is_reference(D)),
+    ?assertNot(is_binary(D)),
+    ?assertError(badarg, midiio:close(make_ref())),
+    ok = midiio:close(D).
+
+%% Row 5: close/1 → ok on a live device.
+open_output_close_roundtrip_test() ->
+    {ok, D} = midiio:open_output_virtual(),
+    ?assertEqual(ok, midiio:close(D)).
+
+%% Row 6: double close → {error, not_open}, no crash.
+open_output_double_close_test() ->
+    {ok, D} = midiio:open_output_virtual(),
+    ?assertEqual(ok, midiio:close(D)),
+    ?assertEqual({error, not_open}, midiio:close(D)).
+
+%% Row 8: dropping the handle runs the destructor, which uninits the per-device
+%% context exactly once (counted via uninit_count, shared with the context dtor).
+device_gc_runs_destructor_once_test() ->
+    Before = midiio:uninit_count(),
+    open_device_and_die(fun(_D) -> ok end),
+    reclaim(),
+    ?assertEqual(Before + 1, midiio:uninit_count()).
+
+%% Rows 8 + 9: an explicit close uninits once; the GC destructor must not uninit
+%% again (the live flag guards the double path).
+device_close_then_gc_no_double_uninit_test() ->
+    Before = midiio:uninit_count(),
+    open_device_and_die(fun(D) -> ok = midiio:close(D) end),
+    reclaim(),
+    ?assertEqual(Before + 1, midiio:uninit_count()).
+
+%% Row 12: real-hardware open (macOS). Only runs when a destination is present
+%% (headless CI has none — then it's a no-op, covered by the virtual path above).
+open_output_real_hardware_test() ->
+    {ok, C} = midiio:context_open(),
+    Outs = midiio:list_outputs(C),
+    ok = midiio:context_close(C),
+    case Outs of
+        [] ->
+            ok; %% no destinations on this host; skip the hardware open
+        [_ | _] ->
+            {ok, D} = midiio:open_output(0),
+            ?assert(is_reference(D)),
+            ?assertEqual(ok, midiio:close(D))
+    end.
+
 %% ── helpers ────────────────────────────────────────────────────────────────
 
 %% A port list is a list of {non_neg_integer(), binary()} (possibly empty).
@@ -135,6 +193,14 @@ open_and_die(Body) ->
     {_Pid, MRef} = spawn_monitor(fun() ->
         {ok, R} = midiio:context_open(),
         Body(R)
+    end),
+    receive {'DOWN', MRef, process, _, _} -> ok end.
+
+%% Same, for a (virtual) output device.
+open_device_and_die(Body) ->
+    {_Pid, MRef} = spawn_monitor(fun() ->
+        {ok, D} = midiio:open_output_virtual(),
+        Body(D)
     end),
     receive {'DOWN', MRef, process, _, _} -> ok end.
 

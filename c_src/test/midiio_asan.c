@@ -64,6 +64,38 @@ int main(void)
         assert(mm_context_uninit(&ctx) == MM_INVALID_ARG);
     }
 
+    /* Device lifecycle (arc 2 slice 1): the per-device context + virtual output
+     * port, opened and torn down in the destructor's order — port first, then
+     * context — many times. A virtual source needs no destination, so this runs
+     * headlessly. Catches leaks/use-after-free in the open_output/close cycle. */
+    for (int i = 0; i < 200; i++) {
+        mm_context ctx;
+        mm_device  dev;
+
+        assert(mm_context_init(&ctx, "midiio-out:asan") == MM_SUCCESS);
+        assert(mm_out_open_virtual(&ctx, &dev) == MM_SUCCESS);
+
+        assert(mm_out_close(&dev) == MM_SUCCESS);     /* port first */
+        assert(mm_context_uninit(&ctx) == MM_SUCCESS); /* then the context */
+
+        /* Double close/uninit are guarded no-ops (the resource `live` flag does
+         * this in the NIF; minimidio rejects the repeat). */
+        assert(mm_out_close(&dev) == MM_NOT_OPEN);
+        assert(mm_context_uninit(&ctx) == MM_INVALID_ARG);
+    }
+
+    /* Partial-failure cleanup (open_output row 7): context init succeeds, the
+     * port open fails (out-of-range index), and the context must be uninited so
+     * nothing leaks — exactly what open_output does before returning {error,_}. */
+    for (int i = 0; i < 200; i++) {
+        mm_context ctx;
+        mm_device  dev;
+
+        assert(mm_context_init(&ctx, "midiio-out:asan-fail") == MM_SUCCESS);
+        assert(mm_out_open(&ctx, &dev, 0x7fffffffu) == MM_OUT_OF_RANGE);
+        assert(mm_context_uninit(&ctx) == MM_SUCCESS); /* clean up the context */
+    }
+
     printf("ASAN-OK\n");
     return 0;
 }

@@ -10,22 +10,29 @@
 -on_load(init/0).
 
 -nifs([context_open/0, context_close/1, result_atom/1, uninit_count/0,
-       list_inputs/1, list_outputs/1, caps/1]).
+       list_inputs/1, list_outputs/1, caps/1,
+       open_output/1, open_output_virtual/0, close/1]).
 
 -export([context_open/0, context_close/1, result_atom/1, uninit_count/0,
-         list_inputs/1, list_outputs/1, caps/1]).
+         list_inputs/1, list_outputs/1, caps/1,
+         open_output/1, open_output_virtual/0, close/1]).
 
-%% NOTE (F2, disclosed-deferred in arc1/slice5): result_atom/1 and uninit_count/0
-%% are test-only introspection NIFs. Gating them out of the default surface via
-%% -ifdef(TEST)/-DMIDIIO_TEST was attempted and reverted — pc builds one shared
-%% .so across profiles, so a test-only NIF set makes load_nif order-dependent.
-%% See arc1/slice5/closing-report.md for the re-entry path. They are harmless (S3).
+%% NOTE (F2, disclosed-deferred in arc1/slice5): result_atom/1, uninit_count/0,
+%% and open_output_virtual/0 are test-only introspection/scaffolding NIFs. Gating
+%% them out of the default surface via -ifdef(TEST)/-DMIDIIO_TEST was attempted
+%% and reverted — pc builds one shared .so across profiles, so a test-only NIF set
+%% makes load_nif order-dependent. See arc1/slice5/closing-report.md for the
+%% re-entry path. They are harmless (S3).
 
--export_type([context/0, backend/0, caps/0]).
+-export_type([context/0, device/0, backend/0, caps/0]).
 
 %% Opaque handle to a native mm_context. Only meaningful when passed back to a
 %% midiio NIF; callers must not inspect it.
 -type context() :: term().
+
+%% Opaque handle to a native mm_device (distinct from context()); the identity of
+%% an open device, passed back to close/1 (and send/recv in later arcs).
+-type device() :: term().
 
 %% The MIDI backend, chosen at compile time by minimidio's platform macro.
 -type backend() :: coremidi | winmm | alsa | webmidi.
@@ -85,4 +92,25 @@ list_outputs(_Ctx) ->
 %% @doc The backend atom and decoded capability flags for the context.
 -spec caps(context()) -> caps().
 caps(_Ctx) ->
+    ?NOT_LOADED.
+
+%% @doc Open the MIDI output port at `Index' (from {@link list_outputs/1}),
+%% returning an opaque device handle. The device owns its own MIDI context;
+%% {@link close/1} (or dropping the handle) reclaims both. Out-of-range index →
+%% `{error, out_of_range}'.
+-spec open_output(non_neg_integer()) -> {ok, device()} | {error, atom()}.
+open_output(_Index) ->
+    ?NOT_LOADED.
+
+%% @doc Test/scaffolding NIF: open a virtual output device (no destination
+%% needed) to exercise the device lifecycle headlessly. Not a public
+%% virtual-port API.
+-spec open_output_virtual() -> {ok, device()} | {error, atom()}.
+open_output_virtual() ->
+    ?NOT_LOADED.
+
+%% @doc Close a device opened with {@link open_output/1}. Returns
+%% `{error, not_open}' if it was already closed.
+-spec close(device()) -> ok | {error, not_open}.
+close(_Dev) ->
     ?NOT_LOADED.

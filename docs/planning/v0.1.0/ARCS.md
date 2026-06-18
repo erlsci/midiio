@@ -86,12 +86,18 @@ Two items carry disclose-defer latitude (F2 dual-build; headless-ALSA runtime).
 
 ## Arc 2 — Outbound transport
 
+> Detailed plan: `arc2/arc-plan.md` (resolves the device/context model — D2
+> concretized). First arc `midi` can integrate against.
+
 **Capability:** open an output device, `send(Dev, <<bytes>>)` a complete message,
 have it emitted byte-exact; closing/crashing the owner leaks no handle.
 
-**Slice 1 — device resource + output lifecycle.** `midiio_device` resource type;
-`open_output/2`, `close/1`; device keeps context alive (`enif_keep_resource`);
-destructor closes the OS handle. The per-device-context model (§2) lands here.
+**Slice 1 — output device resource + lifecycle.** `midiio_device` resource type;
+`open_output(Index)`, `close/1`. **Refinement of §2 (D2):** the device resource
+**embeds its own `mm_context`** (per-device context — own client/seq, no shared-
+handle race, no send-path lock) rather than keeping a separate context resource
+alive; the destructor does `mm_out_close` then `mm_context_uninit`, `live`-guarded.
+No send yet. Docs: `arc2/slice1/`.
 
 **Slice 2 — `send/2` over the raw seam + dirty-I/O.** Define the internal raw
 seam (`midiio_dev_send_raw(dev, bytes, len)`); implement the **interim adapter**

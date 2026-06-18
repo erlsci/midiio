@@ -41,6 +41,17 @@ typedef struct {
 
 static ErlNifResourceType *g_ctx_res_type = NULL;
 
+/* A device owns its own per-device mm_context (DESIGN §2 / arc-2 model): no
+ * shared registry context, no cross-resource keep — the context is embedded, so
+ * one guarded cleanup closes the port then uninits the context. */
+typedef struct {
+    mm_context ctx;
+    mm_device  dev;
+    int        live;
+} midiio_dev_res;
+
+static ErlNifResourceType *g_dev_res_type = NULL;
+
 /* uninit accounting: the destructor runs on a scheduler thread while an
  * explicit close runs on the caller thread, so the live-flag transition and
  * the count are guarded by one mutex (nif-thread-safety: shared mutable state
@@ -113,6 +124,33 @@ static void dtor_context(ErlNifEnv *env, void *obj)
     do_uninit((midiio_ctx_res *)obj);
 }
 
+/* The single guarded cleanup path for a device, shared by close/1 and the
+ * destructor (so an explicit close followed by GC does not double-free). Order
+ * matters: close the OS port first (it references the context), then uninit the
+ * per-device context. Shares g_uninit_lock + g_uninit_count with do_uninit, so
+ * the GC test counts a device's context uninit the same way. Returns 1 if it ran,
+ * 0 if the device was already not live. */
+static int do_dev_cleanup(midiio_dev_res *res)
+{
+    int did = 0;
+    enif_mutex_lock(g_uninit_lock);
+    if (res->live) {
+        mm_out_close(&res->dev);
+        mm_context_uninit(&res->ctx);
+        res->live = 0;
+        g_uninit_count++;
+        did = 1;
+    }
+    enif_mutex_unlock(g_uninit_lock);
+    return did;
+}
+
+static void dtor_device(ErlNifEnv *env, void *obj)
+{
+    (void)env;
+    do_dev_cleanup((midiio_dev_res *)obj);
+}
+
 /* ── load / upgrade ─────────────────────────────────────────────────────────
  * The NIF .so is loaded once and persists; a BEAM-module reload (e.g. cover
  * instrumentation, or a hot upgrade) re-runs -on_load against the same library,
@@ -136,6 +174,14 @@ static int init_statics(ErlNifEnv *env, ErlNifResourceFlags flags)
     if (rt == NULL)
         return -1;
     g_ctx_res_type = rt;
+
+    /* The device type is registered the same way (CREATE on load, TAKEOVER on
+     * upgrade) so it survives the F1 reload path. */
+    ErlNifResourceType *dt = enif_open_resource_type(
+        env, NULL, "midiio_device", dtor_device, flags, NULL);
+    if (dt == NULL)
+        return -1;
+    g_dev_res_type = dt;
 
     /* Created on first load; reused (not re-created) on takeover. */
     if (g_uninit_lock == NULL) {
@@ -342,14 +388,117 @@ static ERL_NIF_TERM caps(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     return m;
 }
 
+/* ── Output device lifecycle (arc 2 slice 1) ────────────────────────────────
+ * mm_context_init + mm_out_open are fast OS calls (MIDIClientCreate /
+ * MIDIOutputPortCreate; snd_seq_open / port-create on ALSA), well under 1 ms —
+ * regular NIFs, not dirty. The dirty send arrives in slice 2. */
+
+/* Finalize a successfully-opened device resource into {ok, Dev}: flip live,
+ * hand the term to Erlang, release our own reference. */
+static ERL_NIF_TERM device_ok(ErlNifEnv *env, midiio_dev_res *res)
+{
+    res->live = 1;
+    ERL_NIF_TERM term = enif_make_resource(env, res);
+    enif_release_resource(res); /* Erlang term is now the sole owner */
+    return enif_make_tuple2(env, am_ok, term);
+}
+
+/* open_output(Index) -> {ok, Dev} | {error, Atom}
+ * Each device gets its own legibly-named per-device context. Partial-failure
+ * cleanup: if the port open fails after the context initialised, uninit the
+ * context before releasing so we never leak a context. */
+static ERL_NIF_TERM open_output(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+
+    unsigned int idx;
+    if (!enif_get_uint(env, argv[0], &idx))
+        return enif_make_badarg(env);
+
+    midiio_dev_res *res =
+        enif_alloc_resource(g_dev_res_type, sizeof(midiio_dev_res));
+    if (res == NULL)
+        return enif_make_tuple2(env, am_error, am_alloc_failed);
+    res->live = 0;
+
+    char name[64];
+    snprintf(name, sizeof name, "midiio-out:%u", idx);
+
+    mm_result r = mm_context_init(&res->ctx, name);
+    if (r != MM_SUCCESS) {
+        enif_release_resource(res);
+        return enif_make_tuple2(env, am_error, result_to_atom(r));
+    }
+
+    r = mm_out_open(&res->ctx, &res->dev, idx);
+    if (r != MM_SUCCESS) {
+        mm_context_uninit(&res->ctx); /* don't leak the context on partial failure */
+        enif_release_resource(res);
+        return enif_make_tuple2(env, am_error, result_to_atom(r));
+    }
+
+    return device_ok(env, res);
+}
+
+/* open_output_virtual() -> {ok, Dev} | {error, Atom}
+ * Test/scaffolding NIF: opens a *virtual* output source (no destination needed)
+ * so the device resource/destructor lifecycle is exercisable headlessly. Not a
+ * public virtual-port API (arc-3 loopback reuses this pattern). */
+static ERL_NIF_TERM open_output_virtual(ErlNifEnv *env, int argc,
+                                        const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    midiio_dev_res *res =
+        enif_alloc_resource(g_dev_res_type, sizeof(midiio_dev_res));
+    if (res == NULL)
+        return enif_make_tuple2(env, am_error, am_alloc_failed);
+    res->live = 0;
+
+    mm_result r = mm_context_init(&res->ctx, "midiio-out:virtual");
+    if (r != MM_SUCCESS) {
+        enif_release_resource(res);
+        return enif_make_tuple2(env, am_error, result_to_atom(r));
+    }
+
+    r = mm_out_open_virtual(&res->ctx, &res->dev);
+    if (r != MM_SUCCESS) {
+        mm_context_uninit(&res->ctx);
+        enif_release_resource(res);
+        return enif_make_tuple2(env, am_error, result_to_atom(r));
+    }
+
+    return device_ok(env, res);
+}
+
+/* close(Dev) -> ok | {error, not_open}
+ * The unified device close (output now; input reuses it in arc 3). Bad handle
+ * (not a midiio_device resource) crashes with badarg — let it crash. */
+static ERL_NIF_TERM close_device(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+
+    midiio_dev_res *res = NULL;
+    if (!enif_get_resource(env, argv[0], g_dev_res_type, (void **)&res))
+        return enif_make_badarg(env);
+
+    if (do_dev_cleanup(res))
+        return am_ok;
+    return enif_make_tuple2(env, am_error, am_not_open);
+}
+
 static ErlNifFunc nif_funcs[] = {
-    {"context_open",  0, context_open},
-    {"context_close", 1, context_close},
-    {"result_atom",   1, result_atom},
-    {"uninit_count",  0, uninit_count},
-    {"list_inputs",   1, list_inputs},
-    {"list_outputs",  1, list_outputs},
-    {"caps",          1, caps},
+    {"context_open",       0, context_open},
+    {"context_close",      1, context_close},
+    {"result_atom",        1, result_atom},
+    {"uninit_count",       0, uninit_count},
+    {"list_inputs",        1, list_inputs},
+    {"list_outputs",       1, list_outputs},
+    {"caps",               1, caps},
+    {"open_output",        1, open_output},
+    {"open_output_virtual", 0, open_output_virtual},
+    {"close",              1, close_device},
 };
 
 /* Args: module, funcs, load, reload(deprecated→NULL), upgrade, unload.
