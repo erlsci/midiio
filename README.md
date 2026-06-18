@@ -1,6 +1,12 @@
 # midiio
 
-*Cross-platform realtime MIDI I/O for the BEAM.*
+[![Build Status][gh-actions-badge]][gh-actions]
+[![Erlang Versions][erlang-badge]][versions]
+[![Tag][github-tag-badge]][github-tag]
+
+[![Project Logo][logo]][logo-large]
+
+*Cross-platform realtime MIDI I/O for the BEAM*
 
 `midiio` is an Erlang NIF over the single-header
 [minimidio](https://github.com/octetta/minimidio) C library. It is the
@@ -35,7 +41,7 @@ active development; the API will change. Published to Hex to reserve the name.
 
 ## Build
 
-    $ rebar3 compile
+    rebar3 compile
 
 ## Updating the vendored minimidio
 
@@ -55,14 +61,14 @@ is not a reliable handle.
 
 **See the current pin:**
 
-    $ cat c_src/minimidio.lock
+    cat c_src/minimidio.lock
 
 **Bump or roll back** — find the commit you want on
 [GitHub](https://github.com/octetta/minimidio/commits/main) and pass its SHA
 (rollbacks work the same way; just pick an older commit):
 
-    $ make vendor-minimidio SHA=<commit-sha>      # pin an exact commit
-    $ make vendor-minimidio REF=main              # pull the latest main, then pin its SHA
+    make vendor-minimidio SHA=<commit-sha>      # pin an exact commit
+    make vendor-minimidio REF=main              # pull the latest main, then pin its SHA
 
 This fetches `minimidio.h` + `LICENSE` at that commit, updates the lock, and makes
 **two commits**:
@@ -74,13 +80,24 @@ This fetches `minimidio.h` + `LICENSE` at that commit, updates the lock, and mak
 
 **Preview without committing** — write the files and print the commit commands:
 
-    $ make vendor-minimidio SHA=<commit-sha> NO_COMMIT=1
+    make vendor-minimidio SHA=<commit-sha> NO_COMMIT=1
 
 **Verify integrity** — fail if the in-tree header has drifted from the lock
 (re-hashes `c_src/minimidio.h`; offline; also runs in CI):
 
-    $ make minimidio-verify
+    make minimidio-verify
 
 Re-pinning the commit already in the lock is a no-op. The tooling is
 `scripts/vendor-minimidio.sh` (POSIX `sh`; needs `curl`, `git`, and a sha256 tool);
 `scripts/test-vendor-minimidio.sh` runs its offline unit tests.
+
+[//]: ---Named-Links---
+
+[logo]: priv/images/logo-250px.png
+[logo-large]: priv/images/logo-2000px.png
+[gh-actions-badge]: https://github.com/erlsci/midiio/workflows/ci/badge.svg
+[gh-actions]: https://github.com/erlsci/midiio/actions
+[erlang-badge]: https://img.shields.io/badge/erlang-22%20to%2029-blue.svg
+[versions]: https://github.com/erlsci/midiio/blob/master/.github/workflows/cicd.yml
+[github-tag]: https://github.com/erlsci/midiio/tags
+[github-tag-badge]: https://img.shields.io/github/tag/erlsci/midiio.svg
