@@ -1,0 +1,32 @@
+# Local Linux test harness for midiio — reproduces the CI `check` + `asan` legs
+# on real glibc/ALSA, the exact surface that produced the _GNU_SOURCE build bug
+# (an Alpine/musl image would not have caught it). The base mirrors CI: the
+# official Erlang/OTP 27 image (Debian bookworm, glibc) with rebar3 preinstalled
+# and gcc/make from buildpack-deps.
+#
+# The ALSA *runtime* rows need a kernel sequencer (/dev/snd/seq). A container
+# shares the host kernel, so those rows only run when the Docker host supplies
+# one — a Linux host with `snd-virmidi` loaded plus `docker run --device
+# /dev/snd` (wired up by `make docker-test`). On macOS/Windows hosts there is no
+# /dev/snd, so they self-skip, exactly like the hosted CI runners.
+FROM erlang:27
+
+# ALSA dev headers/libs for the NIF compile + link (-lasound); alsa-utils gives
+# aconnect/amidi for poking at a passed-through sequencer. gcc/make/git already
+# ship in the erlang image.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libasound2-dev alsa-utils \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /midiio
+
+# Source only — .dockerignore drops _build and the host-built priv/*.so so the
+# container does a clean Linux build from scratch.
+COPY . .
+
+# Warm the dep + PLT layers so re-runs are fast (best-effort: tolerate offline).
+RUN rebar3 as test compile && rebar3 as test dialyzer || true
+
+# Default command: the full Linux gate, same as CI. Runtime rows skip when
+# /dev/snd/seq is absent; the ASan harness defers its lifecycle loops likewise.
+CMD rebar3 as test check && make asan

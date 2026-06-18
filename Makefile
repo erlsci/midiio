@@ -45,12 +45,13 @@ REBAR        := rebar3
 # --- Modules ----------------------------------------------------------------
 include mk/erlang.mk
 include mk/minimidio.mk
+include mk/docker.mk
 
 # ============================================================================
 # Help
 # ============================================================================
 .PHONY: help
-help: help-general help-erlang help-minimidio
+help: help-general help-erlang help-minimidio help-docker
 
 .PHONY: help-general
 help-general:

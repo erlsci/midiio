@@ -1,0 +1,12 @@
+# Keep the Docker build context small and force a clean Linux build: never ship
+# host-built artifacts (the macOS NIF .so, the local _build tree, deps) into the
+# container — they'd shadow the from-scratch glibc/ALSA compile we want to test.
+_build/
+priv/*.so
+priv/*.dll
+priv/*.dylib
+doc/
+**/*.beam
+.git/
+.github/
+.DS_Store
