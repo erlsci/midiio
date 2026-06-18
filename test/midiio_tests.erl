@@ -231,8 +231,15 @@ runtime(Body) ->
 
 runtime_available() ->
     case os:type() of
-        {unix, linux} -> filelib:is_file("/dev/snd/seq");
-        _             -> true
+        %% /dev/snd/seq is a character-device node, so filelib:is_file/1 reports
+        %% false for it — read_file_info/1 returns {ok,_} for any node type, so
+        %% it's the right existence check here.
+        {unix, linux} ->
+            case file:read_file_info("/dev/snd/seq") of
+                {ok, _} -> true;
+                _       -> false
+            end;
+        _ -> true
     end.
 
 %% ── helpers ────────────────────────────────────────────────────────────────

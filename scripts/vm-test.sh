@@ -69,9 +69,10 @@ apt-get install -y -qq "linux-modules-extra-$(uname -r)" >/dev/null 2>&1 || true
 modprobe snd-virmidi 2>/dev/null || modprobe snd-seq 2>/dev/null || true
 
 if [ -e /dev/snd/seq ]; then
-  chmod a+rw /dev/snd/seq
-  # snd-virmidi exposes raw MIDI nodes too; open them so enumeration can see them.
-  chmod a+rw /dev/snd/midi* 2>/dev/null || true
+  # The seq/timer nodes are crw-rw---- root:audio, and udev re-applies that on
+  # every reload — so a chmod doesn't stick. Putting the test user in the audio
+  # group is the durable fix; a fresh `multipass exec` (new login) picks it up.
+  usermod -aG audio ubuntu
   echo "SEQ_OK"
 else
   echo "SEQ_MISSING"
