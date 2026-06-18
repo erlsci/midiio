@@ -35,18 +35,25 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
-      # mm_context_init on ALSA calls snd_seq_open, which needs a sequencer
-      # device. A headless runner has no audio hardware, so load the virtual
-      # sequencer module. Best-effort: if the runner kernel can't provide it, the
-      # ALSA *runtime* steps below will fail and the ALSA runtime rows stay
-      # disclosed-deferred — but build/link/enumeration-shape still run.
-      - name: Load ALSA virtual sequencer (Linux, best-effort)
+      # mm_context_init on ALSA calls snd_seq_open, which needs the sequencer
+      # device /dev/snd/seq. A headless runner has no audio hardware, so provide
+      # it via the in-kernel virtual sequencer. The snd-seq/snd-virmidi modules
+      # ship in linux-modules-extra for the runner's (Azure-flavoured) kernel, so
+      # install that package before loading them. snd-seq creates /dev/snd/seq;
+      # snd-virmidi adds discoverable virtual ports for the real-hardware row.
+      # This is a hard requirement now (not best-effort): if the sequencer is
+      # absent the step fails loudly rather than letting the suite hard-fail later.
+      - name: Load ALSA virtual sequencer (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo modprobe snd-seq snd-virmidi 2>/dev/null \
-            && echo "snd-virmidi loaded; ALSA runtime will run" \
-            || echo "::warning::no ALSA sequencer module; ALSA runtime rows deferred"
-          ls -l /dev/snd/seq 2>/dev/null || echo "(no /dev/snd/seq)"
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+          sudo modprobe snd-seq
+          sudo modprobe snd-virmidi
+          # eunit runs as the unprivileged runner user, which isn't in the audio
+          # group; open the sequencer device so snd_seq_open succeeds.
+          sudo chmod 0666 /dev/snd/seq
+          ls -l /dev/snd/seq
+          test -e /dev/snd/seq
 
       # Full gate: compile (app + NIF), xref, dialyzer, eunit, coverage. On macOS
       # this is the same green gate slices 1-3 produce; on Linux it additionally
