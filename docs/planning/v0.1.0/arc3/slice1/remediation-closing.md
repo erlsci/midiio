@@ -45,10 +45,11 @@ cleanup, so exactly one tears down (no double-free).
 
 - **Deadlock regression (row 2):** `close_during_active_delivery_test_` (20 rounds,
   high-rate `flood` sender + concurrent `close`, `{timeout,60}`) passes.
-  *Disclosed:* on macOS CoreMIDI's `mm_in_stop` doesn't join, so the macOS run
-  exercises the close-vs-delivery path but the **actual deadlock reproduces only
-  on ALSA** — the real tripwire is `make vm-test` / the CI ubuntu leg (pre-fix
-  hangs, post-fix passes).
+  **Proven on real ALSA:** `make vm-test` (Ubuntu 24.04 multipass VM with a real
+  `/dev/snd/seq`, where `mm_in_stop` *does* `pthread_join` the recv thread — the
+  platform that actually deadlocks) ran `rebar3 as test check && make asan` →
+  **All 33 tests passed + ASAN-OK**. Pre-fix this hangs on ALSA; post-fix passes.
+  (macOS/CoreMIDI also passes — no join there.)
 - **Owner-death reclaim (row 9):** `owner_death_reclaims_input_test_` — a child
   `open_input`+`start`s then dies with no stop/close; `uninit_count` increments
   via the `down` callback. No leak.
@@ -69,7 +70,8 @@ were correct and were left untouched, per the remediation's scope discipline.
   (the monitor was already triggered) and tear the device down. No UAF/double-free
   (the guarded `do_dev_cleanup` is idempotent) — at worst a spurious close on a
   death-during-redirect. Acceptable for v0.1.0; noted.
-- **Linux/ALSA** is the platform where the deadlock actually reproduced; the real
-  pre-/post-fix tripwire is `make vm-test` (run as the genuine Linux closure) /
-  the CI ubuntu leg.
+- **Linux/ALSA** is the platform where the deadlock actually reproduces; `make
+  vm-test` was run as the genuine Linux closure — **passed** (33 tests + ASAN-OK on
+  Ubuntu 24.04 with a real sequencer), which also exercises the slice-1/slice-3
+  deferred-Linux rows (Linux load, `alsa` backend, the LeakSanitizer leak-half).
 - **NIF-LEARNINGS L21** captures the join-under-lock deadlock as a sharp `[GAP]`.
