@@ -47,7 +47,9 @@ anywhere. Iteration budget: 5.*
 Total rows: 14. Done: 14. Deferred: 0. No-op: 0.
 Closed at commit `107107f` (minimidio `feat/raw-bytes-api`) on 2026-06-18.
 Behavioral rows (A-0, A-6–A-12) run in the `midiio-test` Multipass VM
-(Ubuntu 24.04, aarch64). CDC verification: _pending_ — see `closing-report.md`.
+(Ubuntu 24.04, aarch64). CDC verification: **PASS** (2026-06-18) — see
+`cdc-verification.md`. 14/14 valid; source rows + additive diff re-run by CDC,
+behavioral rows verified by inspection + CC VM execution (CDC has no ALSA runtime).
 Two disclosed deviations from the slice-doc, neither a logic change: (D1) the
 harness uses **two contexts** instead of one (ALSA hides own-client ports from
 enumeration), and (D2) the raw input is closed before T6 (ALSA drains one event

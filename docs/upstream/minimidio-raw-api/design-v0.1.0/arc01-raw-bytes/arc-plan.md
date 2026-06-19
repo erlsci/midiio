@@ -42,7 +42,7 @@ run this," not lines of diff. Ordered by value and testability.
 |-------|-------|-------------|----------------|
 | **01 — CoreMIDI** | Shared scaffolding (typedef, cap bit, device fields, decls) + cross-platform stubs + full CoreMIDI raw I/O + loopback test harness | CC compiles `-framework CoreMIDI` and runs the harness on macOS | Byte-native, highest value, and the one platform we can actually execute today |
 | 02 — ALSA | ALSA raw I/O (event↔bytes via `snd_midi_event_*`) | **existing midiio-NIF Multipass VM** (real kernel, `snd-seq`, `libasound2-dev`) | Hardest backend, but now *runtime-verifiable* — the VM the NIF already uses proves the path |
-| 03 — WinMM + WebMIDI | Byte-native forwards on the two remaining backends | Windows build / emscripten | Lowest risk; batch the two easy ones |
+| 03 — WinMM + WebMIDI | Byte-native: WebMIDI raw is near-free (internal raw plumbing already exists); WinMM needs framing on both edges. `mm_in_open_virtual_raw` stays stubbed on both (no virtual ports). | **compile-check only** — `zig cc` (WinMM) + `emcc` (WebMIDI) + CDC inspection; runtime round-trip **deferred-with-rationale** (no in-loop path: WinMM needs loopMIDI, WebMIDI needs a browser) | Finishes the arc; honest about the verification gap |
 
 The shared scaffolding lands **inside slice 01** (not as its own slice): it is
 small, and folding it in lets slice 01 be a complete, runnable vertical. Slices

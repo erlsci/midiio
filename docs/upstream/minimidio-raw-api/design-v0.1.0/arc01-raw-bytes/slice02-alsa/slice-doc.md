@@ -135,6 +135,15 @@ ALSA `mm_context_caps` (line 1415): add `MM_CAP_RAW` to the `caps` bitmask.
 
 ### D6 — Harness extension
 
+> **CORRECTION (post-implementation, 2026-06-18):** the single-context topology
+> described below is **wrong for ALSA** and was replaced during slice 02 by a
+> **two-context** harness (separate sender + receiver clients in one process).
+> Reason: `mm__alsa_enum` skips the caller's own client (`if (cid ==
+> al->client_id) continue;`), so a context cannot discover its *own* virtual
+> source — the "find it by name in our own input list" step below can't work.
+> The two-context wiring works identically on CoreMIDI and ALSA. The original
+> text is kept below for history; see `cdc-verification.md` (deviation D1).
+
 Extend `tests/raw_loopback.c` so it compiles and passes on Linux. The API-level
 loopback topology is identical to slice 01's corrected primary path:
 
