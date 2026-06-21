@@ -9,6 +9,7 @@
     {env, []},
     {modules, []},
     {licenses, ["Apache-2.0"]},
+    {exclude_files, ["priv/images"]},
     {links, [
         {"Github", "https://github.com/erlsci/midiio"},
         {"minimidio", "https://github.com/octetta/minimidio"}
