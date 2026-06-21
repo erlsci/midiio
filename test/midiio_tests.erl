@@ -315,9 +315,14 @@ runtime_available() ->
 %% (headless-safe on CoreMIDI / snd-virmidi). Where the virtual source isn't
 %% enumerable (some headless backends), the delivery tests skip.
 
-%% Row 7: out-of-range index → {error, out_of_range} (headless-safe).
+%% Row 7: out-of-range index → {error, out_of_range}. Needs a working backend —
+%% on headless ALSA (no /dev/snd/seq) mm_context_init itself fails with
+%% {error, error} before the index is checked, so gate on runtime availability.
 open_input_out_of_range_test() ->
-    ?assertEqual({error, out_of_range}, midiio:open_input(100000, self())).
+    case runtime_available() of
+        false -> ok;  %% no MIDI backend — skipped (disclosed-deferred to vm-test/CI host)
+        true  -> ?assertEqual({error, out_of_range}, midiio:open_input(100000, self()))
+    end.
 
 %% Row 11: one complete message arrives intact to the owner, with the device
 %% handle as identity and an integer timestamp.
@@ -365,15 +370,19 @@ input_close_double_close_test() ->
 %% harness (make asan / make tsan) is the sanitizer evidence.
 f1_send_vs_close_tripwire_test_() ->
     {timeout, 60, fun() ->
-        lists:foreach(fun(_) ->
-            {ok, Out} = midiio:open_output_virtual(),
-            Parent = self(),
-            S = spawn(fun() -> send_loop(Out, 4000), Parent ! done end),
-            timer:sleep(2),
-            ok = midiio:close(Out),     %% race the sender's loop
-            receive done -> ok after 20000 -> exit({tripwire, S, stuck}) end
-        end, lists:seq(1, 25)),
-        ?assert(true)   %% reached here ⇒ no UAF crashed the VM
+        case runtime_available() of
+            false -> ok;  %% no MIDI backend (headless ALSA) — skip
+            true ->
+                lists:foreach(fun(_) ->
+                    {ok, Out} = midiio:open_output_virtual(),
+                    Parent = self(),
+                    S = spawn(fun() -> send_loop(Out, 4000), Parent ! done end),
+                    timer:sleep(2),
+                    ok = midiio:close(Out),     %% race the sender's loop
+                    receive done -> ok after 20000 -> exit({tripwire, S, stuck}) end
+                end, lists:seq(1, 25)),
+                ?assert(true)   %% reached here ⇒ no UAF crashed the VM
+        end
     end}.
 
 %% Remediation row 2 (S1): close an input WHILE delivery is active must not hang.
@@ -632,9 +641,16 @@ taxonomy() ->
     ].
 
 %% Set up a virtual output source + a real input connected to it (one VM), run
-%% Body(In, Out), then tear down. Skips (no assertion) if the virtual source is
-%% not enumerable on this backend.
+%% Body(In, Out), then tear down. Skips (no assertion) when there's no usable MIDI
+%% backend (headless ALSA — no /dev/snd/seq, so open_output_virtual would fail) or
+%% when the virtual source isn't enumerable on this backend.
 with_loopback(Owner, Body) ->
+    case runtime_available() of
+        false -> ok;  %% no MIDI backend — delivery test skipped
+        true  -> with_loopback_1(Owner, Body)
+    end.
+
+with_loopback_1(Owner, Body) ->
     {ok, Out} = midiio:open_output_virtual(),
     {ok, Ctx} = midiio:context_open(),
     Ins = midiio:list_inputs(Ctx),
@@ -672,9 +688,16 @@ flush_midi_in() ->
     receive {midi_in, _, _, _} -> flush_midi_in() after 0 -> ok end.
 
 %% The input index of a freshly-created virtual output source (so a separate
-%% process can open_input it), plus the source handle to close. no_loopback if the
-%% virtual source isn't enumerable on this backend.
+%% process can open_input it), plus the source handle to close. no_loopback when
+%% there's no usable MIDI backend (headless ALSA) or the virtual source isn't
+%% enumerable on this backend.
 virtual_source_index() ->
+    case runtime_available() of
+        false -> no_loopback;  %% no MIDI backend — caller skips
+        true  -> virtual_source_index_1()
+    end.
+
+virtual_source_index_1() ->
     {ok, Out} = midiio:open_output_virtual(),
     {ok, Ctx} = midiio:context_open(),
     Ins = midiio:list_inputs(Ctx),
