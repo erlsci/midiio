@@ -8,7 +8,9 @@
 > codec-free device-transport** surface — is covered. What's *not* covered is, in
 > every case, a **named non-goal** of the transport layer (UMP/MIDI 2.0, MTC time
 > helpers, and public virtual-port opening), not a gap. Of the 24 public functions:
-> **16 covered, 2 partial, 6 deferred-by-design.**
+> **16 covered + 2 partial = 18 implemented (~75%), 6 deferred-by-design (~25%)** —
+> the deferred quarter being exactly UMP / MIDI 2.0 (2) and the MTC time-code
+> helpers (3), plus public virtual-input open (1).
 
 ## Scope framing
 

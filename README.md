@@ -43,7 +43,12 @@ discovery, output (open / `send` / close, including SysEx), and inbound (open /
 start / stop / close with per-process ownership), byte-exact with no
 normalization. Built and tested on macOS (CoreMIDI) and Linux (ALSA), OTP 24–29.
 
-See [minimidio API coverage](docs/minimidio-api-coverage.md) for exactly what is
+midiio 0.1.0 provides a NIF implementation for roughly **75%** of minimidio's
+public API — the full MIDI 1.0 transport surface, including device discovery,
+MIDI output (open / `send` / close, including SysEx), and inbound MIDI with
+per-process ownership. The remaining ~25% is UMP / MIDI 2.0 and MIDI Time Code
+helpers, deferred by design to the codec layer above. See
+[minimidio API coverage](docs/minimidio-api-coverage.md) for exactly what is
 covered and what is deferred (UMP / MIDI 2.0, MTC helpers, WinMM / Web MIDI).
 
 The next milestone (v0.2.0) swaps the interim send/recv adapter for minimidio's
