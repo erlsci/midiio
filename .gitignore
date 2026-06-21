@@ -24,3 +24,4 @@ rebar3.crashdump
 /workbench
 priv/images/drafts/
 .DS_Store
+docs/release-notes/
