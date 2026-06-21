@@ -11,8 +11,10 @@
 `midiio` is an Erlang NIF over the single-header
 [minimidio](https://github.com/octetta/minimidio) C library. It is the
 **transport layer**: it discovers MIDI devices and moves raw MIDI bytes to and
-from the operating system's MIDI ports (CoreMIDI on macOS, WinMM on Windows,
-ALSA sequencer on Linux, Web MIDI under Emscripten) in real time.
+from the operating system's MIDI ports in real time. v0.1.0 is built and tested on
+**CoreMIDI** (macOS) and the **ALSA sequencer** (Linux); minimidio's **WinMM**
+(Windows) and **Web MIDI** (Emscripten) backends are on the roadmap but not yet
+exercised by `midiio`.
 
 It is deliberately **codec-free**. `midiio` has no opinion about what the bytes
 mean and does not depend on `midilib` — if you want raw realtime MIDI in the
@@ -36,12 +38,85 @@ minimidio.h ─► midiio  (transport: raw bytes ⇄ OS ports)     midilib  (cod
 
 ## Status
 
-Early placeholder — `0.0.1`. The NIF, build wiring, and public API are under
-active development; the API will change. Published to Hex to reserve the name.
+**`0.1.0`** — the MIDI 1.0 transport layer is complete and tested: device
+discovery, output (open / `send` / close, including SysEx), and inbound (open /
+start / stop / close with per-process ownership), byte-exact with no
+normalization. Built and tested on macOS (CoreMIDI) and Linux (ALSA), OTP 24–29.
+
+See [minimidio API coverage](docs/minimidio-api-coverage.md) for exactly what is
+covered and what is deferred (UMP / MIDI 2.0, MTC helpers, WinMM / Web MIDI).
+
+The next milestone (v0.2.0) swaps the interim send/recv adapter for minimidio's
+native raw-bytes API — merged upstream from midiio's own proposal — with no change
+to the Erlang API above the seam.
 
 ## Build
 
+`midiio` builds a NIF, so it needs a C toolchain. On Linux you also need the ALSA
+sequencer development headers:
+
+    # Debian/Ubuntu
+    sudo apt-get install libasound2-dev
+
+Then build, and (optionally) run the full gate — eunit + PropEr + dialyzer + xref,
+plus the AddressSanitizer lifecycle harness:
+
     rebar3 compile
+    rebar3 as test check
+    make asan
+
+## Usage
+
+`midiio` deals in **raw MIDI bytes** — you bring the message representation. A
+status-complete message goes out as a binary; inbound messages arrive as
+`{midi_in, Device, Bytes, TimestampNanos}` to the owning process.
+
+### Discover devices
+
+```erlang
+{ok, Ctx} = midiio:context_open(),
+Outputs = midiio:list_outputs(Ctx),   %% [{Index, Name}], e.g. [{0, <<"IAC Driver Bus 1">>}]
+Inputs  = midiio:list_inputs(Ctx),    %% same shape
+#{backend := Backend} = midiio:caps(Ctx),
+ok = midiio:context_close(Ctx).
+```
+
+### Play a note
+
+```erlang
+{ok, Ctx} = midiio:context_open(),
+[{Idx, _Name} | _] = midiio:list_outputs(Ctx),
+ok = midiio:context_close(Ctx),
+
+{ok, Out} = midiio:open_output(Idx),
+ok = midiio:send(Out, <<16#90, 60, 100>>),   %% note-on:  middle C (60), velocity 100
+timer:sleep(500),
+ok = midiio:send(Out, <<16#80, 60, 0>>),      %% note-off: middle C
+ok = midiio:close(Out).
+```
+
+### Receive inbound MIDI
+
+```erlang
+{ok, Ctx} = midiio:context_open(),
+[{Idx, _Name} | _] = midiio:list_inputs(Ctx),
+ok = midiio:context_close(Ctx),
+
+{ok, In} = midiio:open_input(Idx, self()),   %% deliver to this process
+ok = midiio:start_input(In),
+receive
+    {midi_in, In, Bytes, TsNanos} ->
+        io:format("MIDI in: ~p at ~p ns~n", [Bytes, TsNanos])
+after 5000 ->
+    io:format("(no MIDI received)~n")
+end,
+ok = midiio:stop_input(In),
+ok = midiio:close(In).
+```
+
+`send/2` takes one complete message and routes channel / system / SysEx
+internally; it does **not** normalize (a note-on with velocity 0 stays a note-on).
+SysEx is just a binary that starts with `16#F0` and ends with `16#F7`.
 
 ## Updating the vendored minimidio
 
@@ -97,7 +172,7 @@ Re-pinning the commit already in the lock is a no-op. The tooling is
 [logo-large]: priv/images/logo-2000px.png
 [gh-actions-badge]: https://github.com/erlsci/midiio/workflows/ci/badge.svg
 [gh-actions]: https://github.com/erlsci/midiio/actions
-[erlang-badge]: https://img.shields.io/badge/erlang-22%20to%2029-blue.svg
-[versions]: https://github.com/erlsci/midiio/blob/master/.github/workflows/cicd.yml
+[erlang-badge]: https://img.shields.io/badge/erlang-24%20to%2029-blue.svg
+[versions]: https://github.com/erlsci/midiio/blob/master/.github/workflows/ci.yml
 [github-tag]: https://github.com/erlsci/midiio/tags
 [github-tag-badge]: https://img.shields.io/github/tag/erlsci/midiio.svg

@@ -1,10 +1,12 @@
 %%% @doc Cross-platform realtime MIDI I/O for the BEAM via a NIF over the
 %%% minimidio C library (raw transport; no message codec).
 %%%
-%%% Surface so far: open/close an opaque per-call MIDI context and read-only
-%%% discovery — `list_inputs/1', `list_outputs/1', `caps/1' (arc 1); open/close an
-%%% output device (arc 2 slice 1); and `send/2', the outbound data path (arc 2
-%%% slice 2). Inbound (recv) arrives in arc 3.
+%%% Surface (v0.1.0): an opaque per-call MIDI context and read-only discovery —
+%%% `list_inputs/1', `list_outputs/1', `caps/1'; output devices — `open_output/1',
+%%% `send/2' (byte-exact, no normalization), `close/1'; and inbound —
+%%% `open_input/2', `start_input/1', `stop_input/1', `set_owner/2', with messages
+%%% delivered to the owner process as `{midi_in, Device, Bytes, TsNanos}'.
+%%% Built and tested on CoreMIDI (macOS) and ALSA (Linux).
 %%% @end
 -module(midiio).
 

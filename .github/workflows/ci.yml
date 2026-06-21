@@ -32,16 +32,16 @@ jobs:
       matrix:
         include:
           # --- Linux: the full supported range (OTP 24 floor → latest). ---
-          - { os: ubuntu-22.04,  otp: '24', rebar3: '3.21.0' }
-          - { os: ubuntu-22.04,  otp: '25', rebar3: '3.24.0' }
-          - { os: ubuntu-latest, otp: '26', rebar3: '3.25.1' }
-          - { os: ubuntu-latest, otp: '27', rebar3: '3.27' }
-          - { os: ubuntu-latest, otp: '28', rebar3: '3.27' }
           - { os: ubuntu-latest, otp: '29', rebar3: '3.27' }
+          - { os: ubuntu-latest, otp: '28', rebar3: '3.27' }
+          - { os: ubuntu-latest, otp: '27', rebar3: '3.27' }
+          - { os: ubuntu-latest, otp: '26', rebar3: '3.25.1' }
+          - { os: ubuntu-22.04,  otp: '25', rebar3: '3.24.0' }
+          - { os: ubuntu-22.04,  otp: '24', rebar3: '3.21.0' }
           # --- macOS (Apple Silicon): prebuilds available from OTP 25.1. ---
-          - { os: macos-latest,  otp: '25', rebar3: '3.24.0' }
-          - { os: macos-latest,  otp: '27', rebar3: '3.27' }
           - { os: macos-latest,  otp: '29', rebar3: '3.27' }
+          - { os: macos-latest,  otp: '27', rebar3: '3.27' }
+          - { os: macos-latest,  otp: '25', rebar3: '3.24.0' }
     steps:
       - uses: actions/checkout@v4
 
