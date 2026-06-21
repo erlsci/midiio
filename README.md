@@ -68,6 +68,18 @@ The next milestone (v0.2.0) swaps the interim send/recv adapter for minimidio's
 native raw-bytes API — merged upstream from midiio's own proposal — with no change
 to the Erlang API above the seam.
 
+## Compatibility
+
+| minimidio  | midiio                 | LFE   | Erlang/OTP |
+|------------|------------------------|-------|------------|
+| 0.5.0-dev  | **0.1.0** (current)    | 2.2.0 | 24–29      |
+| 0.6.0-dev  | 0.2.0 (in development) | 2.2.0 | 24–29      |
+
+The Erlang/OTP range is the span CI exercises on macOS + Linux (see the
+[`ci.yml`](.github/workflows/ci.yml) matrix); midiio's API is callable from LFE.
+minimidio is vendored at an exact commit per release — see
+[Updating the vendored minimidio](#updating-the-vendored-minimidio) for the pin.
+
 ## Build
 
 `midiio` builds a NIF, so it needs a C toolchain. On Linux you also need the ALSA
