@@ -25,10 +25,23 @@ want messages encoded/decoded for you and Standard MIDI File support, use the
 ## Where it sits
 
 ```
-minimidio.h ─► midiio  (transport: raw bytes ⇄ OS ports)     midilib  (codec + .mid files, pure Erlang)
-                            └────────────────┬────────────────────┘
-                                          midi  (one batteries-included API)
+                       midi
+             (one batteries-included API)
+                        │
+            ┌───────────┴────────────┐
+         midiio                    midilib
+  (transport: raw bytes      (codec + Standard MIDI
+   ⇄ OS ports; a NIF)         Files; pure Erlang)
+         │
+     minimidio.h
+  (vendored C library;
+   the OS MIDI backends)
 ```
+
+Read top-down as "is built on": `midi` combines `midiio` (I/O) and `midilib`
+(codec) behind one API; `midiio` wraps the vendored `minimidio.h`; `midilib` is
+independent, pure Erlang. `midiio` is codec-free and does **not** depend on
+`midilib`.
 
 | Library | Layer | Native build? |
 |---------|-------|---------------|
