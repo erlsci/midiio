@@ -1,10 +1,10 @@
 # minimidio vendoring lock — managed by scripts/vendor-minimidio.sh; do not edit by hand
 source:    https://github.com/octetta/minimidio
 file:      minimidio.h
-commit:    bb705e81f5c1ac3601b1b75bec45b86d2a15426c
+commit:    0fb49e6ebfb69d20e3b69dff1c41cfc34087a9b4
 version:   v0.5.0-dev
-date:      2026-06-09
-sha256:    3fa1e67f636ec958b6f09c1b11657584805dac7db37dc31130faa7860907d1d6
-author:    Joseph Stewart <joseph.stewart@gmail.com>
+date:      2026-06-18
+sha256:    f6a18b17bda99ac80230fd146729a1a7e7af5b66701b6d6bd2d4428d33122372
+author:    Duncan McGreggor <oubiwann@gmail.com>
 license:   MIT
-retrieved: 2026-06-17
+retrieved: 2026-06-21
