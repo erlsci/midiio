@@ -1,12 +1,19 @@
 name: ci
 
-# Cross-platform gate (arc1/slice5 item 5): build + load the NIF, run the full
-# rebar3 test check, and run the ASan harness on both Linux and macOS. The Linux
-# leg closes the deferred-Linux pile (slice-1 row 3 load, slice-3 row 6 `alsa`
-# backend, slice-1 row 16 leak-half via LeakSanitizer). The ALSA *runtime* rows
-# additionally need a sequencer device; hosted runners can't supply one (see the
-# probe step), so those rows skip there and are covered by macOS + real-hardware
-# hosts.
+# Cross-platform gate: build + load the NIF, run the full rebar3 test check, and
+# run the ASan harness across the supported OTP range on Linux and macOS.
+#
+# OTP FLOOR = 24. The device resource type registers a `down` callback via
+# `enif_init_resource_type` (the `ErlNifResourceTypeInit` members/dyncall form),
+# which is an OTP-24 API — midiio cannot compile on OTP < 24. `rebar.config` pins
+# `{minimum_otp_vsn, "24"}` to enforce it.
+#
+# OS/version availability constraints (empirical — adjust if a leg can't resolve):
+#   * setup-beam's macOS (Apple Silicon) prebuilds start at OTP 25.1, so the
+#     OTP-24 floor is exercised on Linux only.
+#   * Older OTP isn't built for the newest Ubuntu, so OTP 24/25 run on 22.04.
+#   * rebar3 latest ('3') needs a recent OTP; the OTP-24 leg pins a compatible
+#     rebar3.
 
 on:
   push:
@@ -14,16 +21,27 @@ on:
 
 jobs:
   check:
-    name: ${{ matrix.os }}
+    name: OTP ${{ matrix.otp }} · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # rebar3 only supports the 3 newest OTP majors, so each OTP is pinned to the
+      # newest rebar3 release that still supports it (same pinning as erlsci/midilib).
+      # A plain '3'/latest resolves to rebar3 3.27, which cannot run on OTP 24/25 —
+      # hence the explicit per-OTP pins below.
       matrix:
         include:
-          - os: ubuntu-latest
-            otp: '27'
-          - os: macos-latest
-            otp: '27'
+          # --- Linux: the full supported range (OTP 24 floor → latest). ---
+          - { os: ubuntu-22.04,  otp: '24', rebar3: '3.21.0' }
+          - { os: ubuntu-22.04,  otp: '25', rebar3: '3.24.0' }
+          - { os: ubuntu-latest, otp: '26', rebar3: '3.25.1' }
+          - { os: ubuntu-latest, otp: '27', rebar3: '3.27' }
+          - { os: ubuntu-latest, otp: '28', rebar3: '3.27' }
+          - { os: ubuntu-latest, otp: '29', rebar3: '3.27' }
+          # --- macOS (Apple Silicon): prebuilds available from OTP 25.1. ---
+          - { os: macos-latest,  otp: '25', rebar3: '3.24.0' }
+          - { os: macos-latest,  otp: '27', rebar3: '3.27' }
+          - { os: macos-latest,  otp: '29', rebar3: '3.27' }
     steps:
       - uses: actions/checkout@v4
 
@@ -31,7 +49,7 @@ jobs:
         uses: erlef/setup-beam@v1
         with:
           otp-version: ${{ matrix.otp }}
-          rebar3-version: '3'
+          rebar3-version: ${{ matrix.rebar3 }}
 
       - name: Install ALSA dev headers (Linux)
         if: runner.os == 'Linux'
@@ -63,12 +81,12 @@ jobs:
           fi
 
       # Full gate: compile (app + NIF), xref, dialyzer, eunit, coverage. On macOS
-      # this is the same green gate slices 1-3 produce; on Linux it additionally
-      # exercises context_open (row 3) and the `alsa` backend atom (row 6).
+      # this is the full green gate; on Linux it additionally exercises
+      # context_open and the `alsa` backend atom.
       - name: rebar3 as test check
         run: rebar3 as test check
 
       # ASan harness over the minimidio context lifecycle. On Linux ASan bundles
-      # LeakSanitizer, so this closes the leak half of slice-1 row 16.
+      # LeakSanitizer, so this closes the leak half of the lifecycle check.
       - name: ASan harness
         run: make asan
