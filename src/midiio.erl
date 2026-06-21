@@ -10,6 +10,11 @@
 
 -on_load(init/0).
 
+%% NOTE: result_atom/1, uninit_count/0, and seam_roundtrip/1 are test-only NIFs.
+%% Gating them out of the shipped surface behind -DMIDIIO_TEST is not robust under
+%% the single shared .so (L18; see rebar.config). They are kept in the surface but
+%% are memory-safe — in particular seam_roundtrip's seam self-defends on length
+%% (S2 remediation Fix 1), so it cannot read OOB for any input.
 -nifs([context_open/0, context_close/1, result_atom/1, uninit_count/0,
        seam_roundtrip/1, list_inputs/1, list_outputs/1, caps/1,
        open_output/1, open_output_virtual/0, close/1, send/2,
@@ -81,6 +86,8 @@ uninit_count() ->
 
 %% @doc Test NIF: round-trip `Bytes' through both raw seams (outbound parse +
 %% inbound build) with no I/O. Used by the PropEr bytes⇄message bridge property.
+%% Memory-safe for any input (the seam self-defends on length); a truncated
+%% fixed-length status returns `{error, unsupported_status}'.
 -spec seam_roundtrip(binary()) -> {ok, binary()} | {error, unsupported_status}.
 seam_roundtrip(_Bytes) ->
     ?NOT_LOADED.

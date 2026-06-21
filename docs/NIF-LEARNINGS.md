@@ -478,6 +478,41 @@ res->monitor = nm; res->monitored = 1; res->owner = pid;
 returns `>0` synchronously with no `down`; a live target's `down` is async and
 just blocks on the lock — provided that path does no `pthread_join`, cf. L21.)
 
+## L23 — A seam with a "caller already validated" precondition must self-defend
+**Strength: MUST. Stage: build (arc3/slice2 S2 remediation). `[GAP]`.**
+
+`midiio_bytes_to_msg` documented a precondition — the caller length-validates
+before calling — and indexed `bytes[1]`/`bytes[2]` for `F1`/`F2`/`F3` unguarded.
+That was true for the *original* caller (`send_nif`, which pre-checks via
+`midiio_expected_len`). Then a *second* caller arrived — the `seam_roundtrip`
+test NIF — that only checked `size != 0` and called the seam directly, turning the
+implicit precondition into an **out-of-bounds heap read reachable from safe
+Erlang** (`seam_roundtrip(<<16#F2>>)` reads 2 bytes past a 1-byte binary and
+re-emits the heap into the result — an info-leak). The functional suite never
+caught it: PropEr/eunit only generated full-length messages, so it was latent
+under all-green + clean ASan. **A shared helper must not rely on an unenforced
+caller contract for memory safety — guard every data-byte read on `len` itself,
+regardless of caller.** Corollary: when a memory-safety bug is invisible to
+functional tests, the gate is an ASan run that *flags it pre-fix and is clean
+post-fix* (put the truncated input at the end of a tight heap alloc so the redzone
+catches the read), not green eunit.
+
+```c
+/* Bad - trusts the caller pre-validated length; a new caller → OOB read */
+case 0xF2: m->song_position = bytes[1] | (bytes[2] << 7); return 1;
+
+/* Good - self-defend: a too-short fixed-length status is unframable */
+case 0xF2: if (len < 3) return 0;
+           m->song_position = bytes[1] | (bytes[2] << 7); return 1;
+```
+
+(Hygiene corollary, unresolved: the `seam_roundtrip` test NIF should not ship in
+the production surface — but gating it out behind `-DMIDIIO_TEST` is not robust
+under the single shared `.so` (L18): a forced-rebuild pre_hook breaks rebar3's
+`{artifacts,…}` check, and an unexported-NIF gate fails because `load_nif`
+requires the NIF *exported*. So the safety fix (self-defense, above) is what
+actually closes the hole; surface-gating awaits a per-profile `.so` artifact.)
+
 ---
 
 ## Open threads to resolve into learnings as the build proceeds

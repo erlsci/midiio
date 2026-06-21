@@ -408,9 +408,10 @@ static ERL_NIF_TERM uninit_count(ErlNifEnv *env, int argc,
 /* seam_roundtrip(Bytes) -> {ok, Bytes2} | {error, unsupported_status}
  * Test NIF (arc3/slice2, PropEr): drive a message through BOTH raw seams purely —
  * midiio_bytes_to_msg (outbound parse) then midiio_msg_to_bytes (inbound build),
- * no I/O. A byte-exact round-trip over the generated taxonomy proves the
- * bytes⇄message bridge is lossless (no dropped status, right data-byte count,
- * 14-bit intact, SysEx byte-exact). */
+ * no I/O. It is in the shipped surface (compile-time gating out of the single
+ * shared .so isn't robust — L18; see rebar.config), but it is MEMORY-SAFE:
+ * midiio_bytes_to_msg self-defends on length (S2 remediation Fix 1), so this
+ * caller-skips-the-pre-check entry point cannot read OOB for any input. */
 static ERL_NIF_TERM seam_roundtrip(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
     (void)argc;

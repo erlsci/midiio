@@ -57,9 +57,10 @@ static inline int midiio_expected_len(uint8_t b)
 /* The seam + interim adapter. Parses the leading status byte to learn the
  * message shape, then drives minimidio's struct API. The ONLY place that knows
  * minimidio is message-structured. Caller (NIF wrapper / ASan harness) guarantees
- * len >= 1 and, for the fixed-length statuses, the correct length (the wrapper
- * validates via midiio_expected_len first); the adapter trusts that contract and
- * indexes bytes[1]/bytes[2] directly for the statuses that carry them.
+ * len >= 1; the wrapper also pre-validates fixed-length statuses via
+ * midiio_expected_len. midiio_bytes_to_msg additionally **self-defends**: every
+ * data-byte read is guarded on `len`, so it never reads past `bytes` even when a
+ * caller skips the length pre-check (a too-short status is unframable → 0).
  *
  * TODO(upstream): when native mm_out_send_raw(dev, bytes, len) ships, replace this
  * entire body with `return mm_out_send_raw(dev, bytes, len);` and delete the
@@ -91,12 +92,19 @@ static inline int midiio_bytes_to_msg(const uint8_t *bytes, size_t len, mm_messa
         return 1;
     }
 
-    /* System common + real-time: unique enum types (NOT a nibble shift). */
+    /* System common + real-time: unique enum types (NOT a nibble shift). The
+     * F1/F2/F3 data-byte reads are guarded on `len` (mirroring the channel-voice
+     * guard above), so the seam never reads past `bytes` regardless of caller —
+     * a too-short fixed-length status is unframable (return 0). send_nif already
+     * length-validates, so these guards are inert on the validated send path. */
     switch (b) {
-        case 0xF1: m->type = MM_MTC_QUARTER_FRAME; m->data[0] = bytes[1]; return 1;
-        case 0xF2: m->type = MM_SONG_POSITION;
+        case 0xF1: if (len < 2) return 0;
+                   m->type = MM_MTC_QUARTER_FRAME; m->data[0] = bytes[1]; return 1;
+        case 0xF2: if (len < 3) return 0;
+                   m->type = MM_SONG_POSITION;
                    m->song_position = (uint16_t)(bytes[1] | (bytes[2] << 7)); return 1;
-        case 0xF3: m->type = MM_SONG_SELECT;       m->data[0] = bytes[1]; return 1;
+        case 0xF3: if (len < 2) return 0;
+                   m->type = MM_SONG_SELECT;       m->data[0] = bytes[1]; return 1;
         case 0xF6: m->type = MM_TUNE_REQUEST; return 1;
         case 0xF8: m->type = MM_CLOCK;        return 1;
         case 0xFA: m->type = MM_START;        return 1;

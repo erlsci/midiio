@@ -492,6 +492,22 @@ seam_roundtrip_property_test_() ->
                                   [{numtests, 300}, quiet]))
     end}.
 
+%% S2 remediation (rows 1–3): a truncated fixed-length system-common status
+%% (`F1`/`F2`/`F3` with no data bytes) must NOT read past the input binary. The
+%% seam now self-defends on length, so seam_roundtrip answers
+%% `{error, unsupported_status}` cleanly — no OOB read (the standalone ASan
+%% harness proves the heap-read is gone), no hang, no crash. This is the case the
+%% existing PropEr/eunit corpus never generated (it only made full-length msgs).
+seam_roundtrip_truncated_status_test() ->
+    ?assertEqual({error, unsupported_status}, midiio:seam_roundtrip(<<16#F1>>)),
+    ?assertEqual({error, unsupported_status}, midiio:seam_roundtrip(<<16#F2>>)),
+    ?assertEqual({error, unsupported_status}, midiio:seam_roundtrip(<<16#F3>>)),
+    %% a one-data-byte F2 (needs two) is also too short → unframable
+    ?assertEqual({error, unsupported_status}, midiio:seam_roundtrip(<<16#F2, 16#10>>)),
+    %% full-length still round-trips byte-exact (the guards are inert when valid)
+    ?assertEqual({ok, <<16#F2, 16#10, 16#20>>},
+                 midiio:seam_roundtrip(<<16#F2, 16#10, 16#20>>)).
+
 %% ── arc3/slice2 Group C: upstream quirk cases (disclosed-tracked = pass) ──────
 
 %% Row 12: U1 — large SysEx (>~256 B) over a CoreMIDI virtual source fails

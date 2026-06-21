@@ -28,6 +28,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -225,6 +226,25 @@ int main(void)
         memset(&m, 0, sizeof m);
         m.type = MM_SYSEX;          /* caller uses msg->sysex */
         assert(midiio_msg_to_bytes(&m, buf) == 0);
+    }
+
+    /* Truncated system-common (arc3/slice2 S2 remediation, ledger rows 1–3).
+     * The seam must self-defend: F1/F2/F3 carry data bytes, and a caller that
+     * skips the length pre-check (e.g. the seam_roundtrip test NIF) must not make
+     * midiio_bytes_to_msg read past the input. Each status is placed at the END of
+     * a TIGHT heap allocation so ASan's redzone catches any read of bytes[1]/[2].
+     * Pre-fix this flags heap-buffer-overflow; post-fix the guards return 0
+     * (unframable) and it is clean. */
+    {
+        const uint8_t trunc[] = {0xF1, 0xF2, 0xF3}; /* each needs >= 2/3 bytes */
+        for (size_t i = 0; i < sizeof trunc / sizeof trunc[0]; i++) {
+            uint8_t *one = (uint8_t *)malloc(1); /* exactly 1 byte: status only */
+            one[0] = trunc[i];
+            mm_message m;
+            int framed = midiio_bytes_to_msg(one, 1, &m); /* must NOT read one[1]/[2] */
+            assert(framed == 0);                          /* too short → unframable */
+            free(one);
+        }
     }
 
     /* Input device lifecycle (arc3 row 17): open a virtual input destination,
