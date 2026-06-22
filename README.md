@@ -80,6 +80,11 @@ The Erlang/OTP range is the span CI exercises on macOS + Linux (see the
 minimidio is vendored at an exact commit per release — see
 [Updating the vendored minimidio](#updating-the-vendored-minimidio) for the pin.
 
+> **minimidio versions** are forward-looking: minimidio publishes no tags, so the
+> version string is a human label, not a reliable handle. 0.2.0 currently vendors
+> commit `0fb49e6` (the raw-API merge, still self-reporting `v0.5.0-dev`) and will
+> track minimidio's `0.6.0-dev` once that version bump lands upstream.
+
 ## Build
 
 `midiio` builds a NIF, so it needs a C toolchain. On Linux you also need the ALSA
